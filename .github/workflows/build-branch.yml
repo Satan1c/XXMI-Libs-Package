@@ -1,11 +1,11 @@
-name: Build Branch
+name: Build Branches
 
 
 on:
   push:
     branches:
+      - master
       - bind-flags
-  # Run manually from any branch (e.g. master) to get a baseline build
   workflow_dispatch:
 
 
@@ -17,9 +17,16 @@ jobs:
   build:
     runs-on: windows-2022
 
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [master, bind-flags]
+
     steps:
-    - name: Checkout code
+    - name: Checkout ${{ matrix.ref }}
       uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.ref }}
 
     - name: Add MSBuild for VS2022 to PATH
       uses: microsoft/setup-msbuild@v2
@@ -32,6 +39,6 @@ jobs:
     - name: Upload DLLs
       uses: actions/upload-artifact@v4
       with:
-        name: XXMI-PACKAGE-${{ github.ref_name }}-${{ github.sha }}
+        name: XXMI-PACKAGE-${{ matrix.ref }}
         path: x64/Zip Release/*.dll
         if-no-files-found: error
