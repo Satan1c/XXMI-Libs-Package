@@ -1,0 +1,37 @@
+name: Build Branch
+
+
+on:
+  push:
+    branches:
+      - bind-flags
+  # Run manually from any branch (e.g. master) to get a baseline build
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Add MSBuild for VS2022 to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        vs-version: '[17.0,18.0)'
+
+    - name: Build solution
+      run: msbuild StereoVisionHacks.sln -property:Configuration="Zip Release" -property:Platform=x64 -target:rebuild -verbosity:minimal
+
+    - name: Upload DLLs
+      uses: actions/upload-artifact@v4
+      with:
+        name: XXMI-PACKAGE-${{ github.ref_name }}-${{ github.sha }}
+        path: x64/Zip Release/*.dll
+        if-no-files-found: error
