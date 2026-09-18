@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - master
-      - bind-flags
+      - dev
   workflow_dispatch:
 
 
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [master, bind-flags]
+        ref: [master, dev]
 
     steps:
     - name: Checkout ${{ matrix.ref }}
