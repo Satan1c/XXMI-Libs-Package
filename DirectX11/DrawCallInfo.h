@@ -5,15 +5,11 @@
 
 struct TextureOverride;
 
-// Per-draw memo of TextureOverride lookups. The same resource is commonly
-// looked up several times within one draw (pre and post lists, several
-// sections, several slots), and the result depends only on the resource and
-// the draw's call info, so the first lookup's result is reused for the rest
-// of the draw. Entries hold a reference on their resource so the address
-// can't be recycled by another resource while the memo is alive. Copies of
-// a DrawCallInfo start with an empty memo. Inline storage so a draw with a
-// single lookup doesn't pay for an allocation; once full, further lookups
-// just aren't memoised.
+// Per-draw memo of TextureOverride lookups: the result depends only on the
+// resource and this draw's call info, and the same resource is commonly
+// looked up several times per draw (pre and post lists, several sections or
+// slots). Entries hold a reference so the resource address can't be reused
+// mid-draw. Copies start empty; once full, further lookups aren't memoised.
 struct TextureOverrideMemo
 {
 	static const unsigned capacity = 16;

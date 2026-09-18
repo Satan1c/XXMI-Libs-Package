@@ -992,11 +992,9 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 		Profiling::start(&profiling_state);
 	}
 
-	// Contamination is only tracked for 2D/3D textures (see
-	// supports_hash_tracking), but the bulk of the calls here are for
-	// buffers - constant buffers Mapped or UpdateSubresource'd on every
-	// draw. Ask the resource for its type up front so those bail before
-	// taking the locks and searching the resource map for nothing:
+	// Only 2D/3D textures are tracked (supports_hash_tracking). Most calls
+	// are per-draw buffer updates, so check the type before taking the
+	// locks and searching the resource map:
 	dest->GetType(&dim);
 	if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D && dim != D3D11_RESOURCE_DIMENSION_TEXTURE3D)
 		goto out_profile;
@@ -1791,6 +1789,8 @@ static void collect_fuzzy_texture_overrides_for_resource(ID3D11Resource *resourc
 	}
 }
 
+// On config reload: hash_matches point into G->mTextureOverrideMap, which
+// is rebuilt.
 void InvalidateTextureOverrideCandidates()
 {
 	EnterCriticalSectionPretty(&G->mResourcesLock);
@@ -1887,6 +1887,7 @@ void find_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, Texture
 
 	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
 	if (!candidates) {
+		// No handle info to cache in (3DMigoto's own resources):
 		find_texture_overrides_for_resource_desc(resource, matches, call_info);
 	} else {
 		for (TextureOverride *to : candidates->fuzzy_matches) {
@@ -1999,7 +2000,8 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 		Profiling::start(&profiling_state);
 	}
 
-	// Same order as the uncached path below:
+	// Same order as the uncached path in the else branch, which is used for
+	// resources without handle info (3DMigoto's own resources):
 	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
 	if (candidates) {
 		if (candidates->hash_matches) {

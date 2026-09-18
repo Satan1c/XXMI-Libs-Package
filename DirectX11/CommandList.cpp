@@ -49,11 +49,9 @@ struct command_list_profiling_state {
 	LARGE_INTEGER saved_recursive_time;
 };
 
-// Command lists and commands register themselves in the profiling sets the
-// first time they run in a collection window. The generation counter lets
-// them notice a new window from a cheap compare instead of a set insert on
-// every execution, which at thousands of executions per frame was a
-// measurable chunk of the "Command lists total" it reports:
+// Bumped whenever the profiling sets are cleared. A list/command whose
+// generation doesn't match registers itself again - cheaper than a set
+// insert on every execution:
 static unsigned profiling_generation = 1;
 
 void clear_command_list_profiling()
@@ -8326,11 +8324,9 @@ IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& targ
 			return expression_ret;
 	}
 
-	// Bare "ps-t" / "ps-u" / "ps-cb": a slot range whose bounds come from
-	// the other side of the assignment (ps-t = ref PoolFoo[0:9]).
-	// Only matches when the suffix is *exactly* the keyword with nothing
-	// trailing (no slot digits) - anything else (e.g. "ps-t0") must fall
-	// through to the numeric slot parsing below.
+	// Bare "ps-t" / "ps-u" / "ps-cb": a slot range taking its bounds from
+	// the other side (ps-t = ref PoolFoo[0:9]). Exactly the keyword only -
+	// "ps-t0" falls through to the numeric slot parsing below.
 	if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE && length >= 4
 		&& is_shader_resource(target[0]) && target[1] == L's' && target[2] == L'-')
 	{
@@ -8562,11 +8558,9 @@ void ClearDeferredBindFlags()
 
 void PropagateDeferredBindFlags()
 {
-	// A chain like "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" can
-	// be parsed in either order, and the one-hop propagation done while
-	// parsing only sees the flags dst has at that moment. Walk the edges
-	// until nothing changes so flags flow through the whole chain
-	// regardless of parse order.
+	// "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" may be parsed in
+	// either order, so the one-hop propagation at parse time can miss flags
+	// dst gains later. Iterate to a fixed point:
 	bool changed;
 	do {
 		changed = false;
@@ -8617,6 +8611,7 @@ static CommandListCommand* parse_pool_copy_operation(
 			return nullptr;
 		}
 		src.custom_resource_pool->PropagateFlags(dst.custom_resource_pool->resource_template->bind_flags, dst.custom_resource_pool->resource_template->misc_flags);
+		// Again after parsing, for flags dst gains from later sections:
 		DeferBindFlagsPropagation(src.custom_resource_pool->resource_template, dst.custom_resource_pool->resource_template);
 		break;
 
@@ -8768,8 +8763,7 @@ static CommandListCommand* parse_resource_copy_operation(
 			LogOverlayW(LOG_WARNING, L"To use resources with incompatible flags explicitly add 'copy' keyword, e.g. 'vs-cb0 = copy ResourceRWBufferCB'\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
 		}
-		// dst may gain more flags from sections parsed after this one,
-		// resolved by PropagateDeferredBindFlags() once parsing is complete.
+		// Again after parsing, for flags dst gains from later sections:
 		if (dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE || dst.type == ResourceCopyTargetType::POOL)
 			DeferBindFlagsPropagation(src_custom_resource, dst.GetCustomResource(nullptr));
 	}
@@ -8792,6 +8786,7 @@ static CommandListCommand* parse_layout_operation(
 	const wchar_t* section, ResourceCopyTarget& dst, wstring* val, CommandList* command_list, const wstring* ini_namespace
 )
 {
+	// Layout overrides need a fixed slot, not vb[$i]:
 	if (dst.type != ResourceCopyTargetType::VERTEX_BUFFER || dst.slot_expression)
 		return nullptr;
 
@@ -12477,6 +12472,8 @@ void ResourceCopyOperation::CopyResourceToPool(
 	dst.SetCustomResource(nullptr);
 }
 
+// Inside a ShaderResourceBindBatch the view is handed back to the batch
+// instead of being bound:
 void ResourceCopyOperation::SetOrDeferResource(CommandListState *state,
 		ID3D11Resource *res, ID3D11View *view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size)
 {
@@ -12585,6 +12582,8 @@ void ShaderResourceBindBatch::run(CommandListState *state)
 	if (seed_with_current)
 		GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
+	// Each operation resolves its view as usual but hands it back through
+	// SetOrDeferResource() instead of binding it:
 	for (auto &op : operations) {
 		DeferredBinding binding;
 
@@ -12686,12 +12685,10 @@ void ConditionalSlotCopyOperation::run(CommandListState *state)
 	}
 }
 
-// Walks a simple if/elif/else chain, checking that every reachable branch
-// either contains exactly one qualifying (bind ? is_batchable_bind :
-// is_batchable_fetch) operation for the same fixed stage+slot, or is empty
-// (only valid for the final branch, meaning "leave the current binding" -
-// the same thing unless_null already does for a batch). Mixing pre/post
-// within the chain is out of scope and bails out.
+// Collects the branches of an if/elif/else chain if every branch is exactly
+// one batchable operation on the same stage+slot (in the given direction).
+// A missing else is allowed and means "leave the current binding". Chains
+// with post commands are not handled.
 static bool collect_conditional_slot_chain(IfCommand *if_cmd, bool bind, wchar_t stage, unsigned slot,
 	std::vector<ConditionalSlotBranch> &out)
 {
@@ -12758,10 +12755,8 @@ static std::shared_ptr<ResourceCopyOperation> try_fold_conditional_slot_op(std::
 		return nullptr;
 
 	merged->bind = bind;
-	// Only the handful of scalar fields the optimiser's grouping logic
-	// reads: ResourceCopyTarget isn't copyable (it owns unique_ptr
-	// expressions), and merged->dst/src are never used for the real copy -
-	// each run() delegates entirely to the matched branch's own operation:
+	// ResourceCopyTarget isn't copyable; the batcher only needs the fields
+	// it groups by, the copy itself is done by the matched branch's op:
 	ResourceCopyTarget &fixed_side = bind ? merged->dst : merged->src;
 	const ResourceCopyTarget &fixed_side_src = bind ? true_op->dst : true_op->src;
 	fixed_side.type = fixed_side_src.type;
@@ -13018,7 +13013,7 @@ static CommandListCommand* parse_slot_range_operation(
 		D3D11_BIND_FLAG bind_flags = dst.BindFlags(NULL, &misc_flags);
 		bool ok = src.type == ResourceCopyTargetType::POOL
 			? src.custom_resource_pool->PropagateFlags(bind_flags, misc_flags)
-			: src.GetCustomResource(nullptr, true)->AddFlags(bind_flags, misc_flags, true);
+			: src.GetCustomResource(nullptr, true)->AddFlags(bind_flags, misc_flags); // true: is_assignment
 		if (!ok) {
 			LogOverlayW(LOG_WARNING, L"Slot range source has incompatible bind flags\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
@@ -13167,6 +13162,8 @@ void SlotRangeCopyOperation::RunBind(CommandListState *state, unsigned first, un
 		ID3D11View *src_view = NULL;
 		CustomResource *source = single_source;
 
+		// GetResource(id, template_lookup, use_ring_index, is_assignment);
+		// pool indices wrap like PoolFoo[-1]:
 		if (src.type == ResourceCopyTargetType::POOL)
 			source = src.custom_resource_pool->GetResource((float)(pool_first + (int)i), false, false, false);
 
@@ -13216,6 +13213,8 @@ void SlotRangeCopyOperation::RunBind(CommandListState *state, unsigned first, un
 		}
 
 		if (source) {
+			// dst is passed so the source is substantiated with this
+			// slot type's bind flags:
 			ResourceCopyTarget element;
 			element.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
 			element.SetCustomResource(source);

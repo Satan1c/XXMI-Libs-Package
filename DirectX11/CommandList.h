@@ -104,7 +104,7 @@ public:
 	LARGE_INTEGER post_time_spent;
 	unsigned pre_executions;
 	unsigned post_executions;
-	unsigned profiling_generation = 0;
+	unsigned profiling_generation = 0; // Profiling window this was registered in
 
 	virtual ~CommandListCommand() {};
 
@@ -186,7 +186,7 @@ public:
 	LARGE_INTEGER time_spent_inclusive;
 	LARGE_INTEGER time_spent_exclusive;
 	unsigned executions;
-	unsigned profiling_generation = 0;
+	unsigned profiling_generation = 0; // Profiling window this was registered in
 
 	bool runtime_populated = false;
 
@@ -728,10 +728,9 @@ private:
 typedef std::unordered_map<std::wstring, CustomResourcePool> CustomResourcePools;
 extern CustomResourcePools customResourcePools;
 
-// Bind flags of a custom resource referenced into another custom resource or
-// pool depend on where that destination is referenced in turn, which may be
-// parsed later (section parse order is arbitrary). Edges are collected while
-// parsing and resolved to a fixed point once every command list is parsed.
+// A custom resource referenced into another one needs that one's bind flags,
+// which may still grow while later sections are parsed. Edges are collected
+// during parsing and resolved once every command list is parsed.
 void ClearDeferredBindFlags();
 void PropagateDeferredBindFlags();
 
@@ -1209,27 +1208,22 @@ public:
 	void run(CommandListState*) override;
 };
 
-// One branch of an if/elif/else chain folded into a ConditionalSlotCopyOperation:
-// condition is NULL for the unconditional terminal branch (else, or the "no
-// branch taken" sentinel below), op is NULL when that branch makes no
-// assignment at all (a missing else - leave the current binding, same as
-// unless_null).
+// One branch of a folded if/elif/else chain. condition is NULL for the else
+// branch; op is NULL for a missing else (leave the current binding).
 struct ConditionalSlotBranch {
 	CommandListExpression *condition;
 	std::shared_ptr<ResourceCopyOperation> op;
 };
 
-// An if/elif/else chain where every reachable branch targets the same fixed
-// slot, folded by the optimiser into one operation so it can sit inside a
-// ShaderResourceBindBatch/FetchBatch instead of acting as a hard break.
-// Evaluates the conditions at run time and defers to whichever branch's
-// operation matched.
+// An if/elif/else chain whose branches all target the same fixed slot,
+// folded by the optimiser into one operation so it can join a
+// ShaderResourceBind/FetchBatch. Evaluates the conditions at run time and
+// runs the matching branch's operation.
 class ConditionalSlotCopyOperation : public ResourceCopyOperation {
 public:
 	bool bind = false;
 	std::vector<ConditionalSlotBranch> branches;
-	// Keeps the original if/elif/else chain (and its CommandListExpressions,
-	// which `branches` points into) alive for as long as this operation is:
+	// Keeps the original IfCommand (whose expressions branches point into) alive:
 	std::shared_ptr<CommandListCommand> owning_if;
 
 	void run(CommandListState*) override;
