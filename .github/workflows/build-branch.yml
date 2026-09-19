@@ -27,6 +27,13 @@ jobs:
       uses: actions/checkout@v4
       with:
         ref: ${{ matrix.ref }}
+        fetch-depth: 0
+
+    # generate-version.ps1 derives the DLL version from the nearest v* tag.
+    # Take them from upstream rather than pushing tags to the fork, which
+    # would trigger the release workflow:
+    - name: Fetch upstream version tags
+      run: git fetch --no-tags https://github.com/SpectrumQT/XXMI-Libs-Package.git "refs/tags/v*:refs/tags/v*"
 
     - name: Add MSBuild for VS2022 to PATH
       uses: microsoft/setup-msbuild@v2
