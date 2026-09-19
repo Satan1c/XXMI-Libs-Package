@@ -981,13 +981,25 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 	UINT dstWidth = 1, dstHeight = 1, dstDepth = 1, dstMip = 0, dstIdx = 0, dstArraySize = 1;
 	bool partial = false;
 	ResourceInfoMap::iterator info_i;
+	D3D11_RESOURCE_DIMENSION dim;
 	Profiling::State profiling_state;
 
 	if (!dest)
 		return;
 
-	if (Profiling::mode == Profiling::Mode::SUMMARY)
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::hash_tracking_overhead.count++;
 		Profiling::start(&profiling_state);
+	}
+
+	// Contamination is only tracked for 2D/3D textures (see
+	// supports_hash_tracking), but the bulk of the calls here are for
+	// buffers - constant buffers Mapped or UpdateSubresource'd on every
+	// draw. Ask the resource for its type up front so those bail before
+	// taking the locks and searching the resource map for nothing:
+	dest->GetType(&dim);
+	if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D && dim != D3D11_RESOURCE_DIMENSION_TEXTURE3D)
+		goto out_profile;
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
@@ -1001,6 +1013,9 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 	dstHash = dst_handle_info->orig_hash;
 	if (!dstHash)
 		goto out_unlock;
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY)
+		Profiling::hash_tracking_overhead.hits++;
 
 	// Faster than catching an out_of_range exception from .at():
 	info_i = G->mResourceInfo.find(dstHash);
@@ -1091,6 +1106,7 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 out_unlock:
 	LeaveCriticalSection(&G->mCriticalSection);
 
+out_profile:
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
 }
@@ -1719,6 +1735,175 @@ void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resour
 	find_texture_overrides_by_hash_from_fuzzy_matches(hash, fuzzy_matches, matches, call_info);
 }
 
+// find_texture_overrides_for_desc without the draw context filter, for caching:
+template <typename DescType>
+static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::vector<TextureOverride*> *out)
+{
+	FuzzyTextureOverrides::iterator i;
+	Profiling::State profiling_state;
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::texture_override_fuzzy_match_overhead.count++;
+		Profiling::start(&profiling_state);
+	}
+
+	for (i = G->mFuzzyTextureOverrides.begin(); i != G->mFuzzyTextureOverrides.end(); i++) {
+		if ((*i)->matches(desc))
+			out->push_back((*i)->texture_override);
+	}
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::end(&profiling_state, &Profiling::texture_override_fuzzy_match_overhead);
+		if (!out->empty())
+			Profiling::texture_override_fuzzy_match_overhead.hits++;
+	}
+}
+
+static void collect_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, std::vector<TextureOverride*> *out)
+{
+	D3D11_RESOURCE_DIMENSION dimension;
+	resource->GetType(&dimension);
+	switch (dimension) {
+		case D3D11_RESOURCE_DIMENSION_BUFFER:
+		{
+			D3D11_BUFFER_DESC desc;
+			((ID3D11Buffer*)resource)->GetDesc(&desc);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+		{
+			D3D11_TEXTURE1D_DESC desc;
+			((ID3D11Texture1D*)resource)->GetDesc(&desc);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+		{
+			D3D11_TEXTURE2D_DESC desc;
+			((ID3D11Texture2D*)resource)->GetDesc(&desc);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+		{
+			D3D11_TEXTURE3D_DESC desc;
+			((ID3D11Texture3D*)resource)->GetDesc(&desc);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+		}
+	}
+}
+
+void InvalidateTextureOverrideCandidates()
+{
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+
+	for (auto &entry : G->mResources) {
+		entry.second.texture_override_candidates_valid = false;
+		entry.second.texture_override_candidates.hash_matches = NULL;
+		entry.second.texture_override_candidates.fuzzy_matches.clear();
+	}
+
+	LeaveCriticalSection(&G->mResourcesLock);
+}
+
+TextureOverrideCandidates* get_texture_override_candidates(ID3D11Resource *resource)
+{
+	ResourceHandleInfo *handle_info = GetResourceHandleInfo(resource);
+	if (!handle_info)
+		return NULL;
+
+	TextureOverrideCandidates *candidates = &handle_info->texture_override_candidates;
+
+	if (!handle_info->texture_override_candidates_valid) {
+		if (!G->mFuzzyTextureOverrides.empty())
+			collect_fuzzy_texture_overrides_for_resource(resource, &candidates->fuzzy_matches);
+
+		handle_info->texture_override_candidates_valid = true;
+		handle_info->texture_override_hash = handle_info->hash + 1; // force rebuild below
+	}
+
+	if (handle_info->texture_override_hash != handle_info->hash) {
+		candidates->hash_matches = NULL;
+
+		if (handle_info->hash && !G->mTextureOverrideMap.empty()) {
+			TextureOverrideMap::iterator i = lookup_textureoverride(handle_info->hash);
+			if (i != G->mTextureOverrideMap.end())
+				candidates->hash_matches = &i->second;
+		}
+
+		handle_info->texture_override_hash = handle_info->hash;
+	}
+
+	return candidates;
+}
+
+// Per-draw memo (see TextureOverrideMemo): appends the memoised result to
+// matches and returns true if this resource was already looked up in this
+// draw. call_info is NULL outside of draw calls, where nothing is memoised.
+static bool texture_override_memo_lookup(DrawCallInfo *call_info, ID3D11Resource *resource, bool fuzzy_only, TextureOverrideMatches *matches)
+{
+	if (!call_info)
+		return false;
+
+	TextureOverrideMemo &memo = call_info->texture_override_memo;
+	for (unsigned i = 0; i < memo.count; i++) {
+		TextureOverrideMemo::Entry &entry = memo.entries[i];
+		if (entry.resource == resource && entry.fuzzy_only == fuzzy_only) {
+			matches->insert(matches->end(), entry.matches.begin(), entry.matches.end());
+			return true;
+		}
+	}
+	return false;
+}
+
+static void texture_override_memo_store(DrawCallInfo *call_info, ID3D11Resource *resource, bool fuzzy_only, TextureOverrideMatches *matches, size_t matches_before)
+{
+	if (!call_info)
+		return;
+
+	TextureOverrideMemo &memo = call_info->texture_override_memo;
+	if (memo.count >= TextureOverrideMemo::capacity)
+		return;
+
+	TextureOverrideMemo::Entry &entry = memo.entries[memo.count++];
+	resource->AddRef();
+	entry.resource = resource;
+	entry.fuzzy_only = fuzzy_only;
+	entry.matches.assign(matches->begin() + matches_before, matches->end());
+}
+
+void find_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info)
+{
+	if (G->mFuzzyTextureOverrides.empty())
+		return;
+
+	if (texture_override_memo_lookup(call_info, resource, true, matches))
+		return;
+
+	size_t matches_before = matches->size();
+	Profiling::State profiling_state;
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::texture_override_candidates_lookup_overhead.count++;
+		Profiling::start(&profiling_state);
+	}
+
+	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
+	if (!candidates) {
+		find_texture_overrides_for_resource_desc(resource, matches, call_info);
+	} else {
+		for (TextureOverride *to : candidates->fuzzy_matches) {
+			if (matches_draw_info(to, call_info))
+				matches->push_back(to);
+		}
+	}
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::end(&profiling_state, &Profiling::texture_override_candidates_lookup_overhead);
+		if (matches->size() > matches_before)
+			Profiling::texture_override_candidates_lookup_overhead.hits++;
+	}
+
+	texture_override_memo_store(call_info, resource, true, matches, matches_before);
+}
+
 template <typename DescType>
 static void find_texture_overrides_for_desc(const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info)
 {
@@ -1801,16 +1986,52 @@ void find_texture_overrides_for_resource_desc(ID3D11Resource* resource, TextureO
 
 void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info)
 {
-	find_texture_overrides_for_resource_by_hash(resource, matches, call_info);
+	if (G->mTextureOverrideMap.empty() && G->mFuzzyTextureOverrides.empty())
+		return;
 
-	// Allow fuzzy matches to be processed even when exact matches exist
-	//if (!matches->empty()) {
-	//	// If we got a result it was matched by hash - that's an exact
-	//	// match and we don't process any fuzzy matches
-	//	return;
-	//}
+	if (texture_override_memo_lookup(call_info, resource, false, matches))
+		return;
 
-	find_texture_overrides_for_resource_desc(resource, matches, call_info);
+	size_t matches_before = matches->size();
+	Profiling::State profiling_state;
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::texture_override_candidates_lookup_overhead.count++;
+		Profiling::start(&profiling_state);
+	}
+
+	// Same order as the uncached path below:
+	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
+	if (candidates) {
+		if (candidates->hash_matches) {
+			for (TextureOverride &to : *candidates->hash_matches) {
+				if (matches_draw_info(&to, call_info))
+					matches->push_back(&to);
+			}
+		}
+		for (TextureOverride *to : candidates->fuzzy_matches) {
+			if (matches_draw_info(to, call_info))
+				matches->push_back(to);
+		}
+	} else {
+		find_texture_overrides_for_resource_by_hash(resource, matches, call_info);
+
+		// Allow fuzzy matches to be processed even when exact matches exist
+		//if (!matches->empty()) {
+		//	// If we got a result it was matched by hash - that's an exact
+		//	// match and we don't process any fuzzy matches
+		//	return;
+		//}
+
+		find_texture_overrides_for_resource_desc(resource, matches, call_info);
+	}
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY) {
+		Profiling::end(&profiling_state, &Profiling::texture_override_candidates_lookup_overhead);
+		if (matches->size() > matches_before)
+			Profiling::texture_override_candidates_lookup_overhead.hits++;
+	}
+
+	texture_override_memo_store(call_info, resource, false, matches, matches_before);
 }
 
 bool TextureOverrideLess(const struct TextureOverride &lhs, const struct TextureOverride &rhs)

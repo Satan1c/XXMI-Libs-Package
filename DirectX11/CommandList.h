@@ -104,6 +104,7 @@ public:
 	LARGE_INTEGER post_time_spent;
 	unsigned pre_executions;
 	unsigned post_executions;
+	unsigned profiling_generation = 0;
 
 	virtual ~CommandListCommand() {};
 
@@ -185,6 +186,7 @@ public:
 	LARGE_INTEGER time_spent_inclusive;
 	LARGE_INTEGER time_spent_exclusive;
 	unsigned executions;
+	unsigned profiling_generation = 0;
 
 	bool runtime_populated = false;
 
@@ -206,6 +208,7 @@ private:
 extern std::vector<CommandList*> registered_command_lists;
 extern std::unordered_set<CommandList*> command_lists_profiling;
 extern std::unordered_set<CommandListCommand*> command_lists_cmd_profiling;
+void clear_command_list_profiling();
 
 // Forward declaration to avoid circular reference since Override.h includes
 // HackerDevice.h includes HackerContext.h includes CommandList.h
@@ -724,6 +727,13 @@ private:
 
 typedef std::unordered_map<std::wstring, CustomResourcePool> CustomResourcePools;
 extern CustomResourcePools customResourcePools;
+
+// Bind flags of a custom resource referenced into another custom resource or
+// pool depend on where that destination is referenced in turn, which may be
+// parsed later (section parse order is arbitrary). Edges are collected while
+// parsing and resolved to a fixed point once every command list is parsed.
+void ClearDeferredBindFlags();
+void PropagateDeferredBindFlags();
 
 // Forward declaration since TextureOverride also contains a command list
 struct TextureOverride;

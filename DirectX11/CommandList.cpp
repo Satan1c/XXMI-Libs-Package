@@ -49,17 +49,30 @@ struct command_list_profiling_state {
 	LARGE_INTEGER saved_recursive_time;
 };
 
+// Command lists and commands register themselves in the profiling sets the
+// first time they run in a collection window. The generation counter lets
+// them notice a new window from a cheap compare instead of a set insert on
+// every execution, which at thousands of executions per frame was a
+// measurable chunk of the "Command lists total" it reports:
+static unsigned profiling_generation = 1;
+
+void clear_command_list_profiling()
+{
+	command_lists_profiling.clear();
+	command_lists_cmd_profiling.clear();
+	profiling_generation++;
+}
+
 static inline void profile_command_list_start(CommandList *command_list, CommandListState *state,
 		command_list_profiling_state *profiling_state)
 {
-	bool inserted;
-
 	if ((Profiling::mode != Profiling::Mode::SUMMARY)
 	 && (Profiling::mode != Profiling::Mode::TOP_COMMAND_LISTS))
 		return;
 
-	inserted = command_lists_profiling.insert(command_list).second;
-	if (inserted) {
+	if (command_list->profiling_generation != profiling_generation) {
+		command_list->profiling_generation = profiling_generation;
+		command_lists_profiling.insert(command_list);
 		command_list->time_spent_inclusive.QuadPart = 0;
 		command_list->time_spent_exclusive.QuadPart = 0;
 		command_list->executions = 0;
@@ -91,13 +104,12 @@ static inline void profile_command_list_end(CommandList *command_list, CommandLi
 static inline void profile_command_list_cmd_start(CommandListCommand *cmd,
 		command_list_profiling_state *profiling_state)
 {
-	bool inserted;
-
 	if (Profiling::mode != Profiling::Mode::TOP_COMMANDS)
 		return;
 
-	inserted = command_lists_cmd_profiling.insert(cmd).second;
-	if (inserted) {
+	if (cmd->profiling_generation != profiling_generation) {
+		cmd->profiling_generation = profiling_generation;
+		command_lists_cmd_profiling.insert(cmd);
 		cmd->pre_time_spent.QuadPart = 0;
 		cmd->post_time_spent.QuadPart = 0;
 		cmd->pre_executions = 0;
@@ -8348,6 +8360,58 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 #pragma endregion ParseResourceCopyTarget
 
 
+#pragma region DeferredBindFlags
+
+// (src, dst) pairs of custom resources linked by a reference copy during the
+// current config load. src must eventually carry every bind flag dst carries.
+static std::vector<std::pair<CustomResource*, CustomResource*>> deferred_bind_flags;
+
+static void DeferBindFlagsPropagation(CustomResource* src, CustomResource* dst)
+{
+	if (src && dst && src != dst)
+		deferred_bind_flags.emplace_back(src, dst);
+}
+
+void ClearDeferredBindFlags()
+{
+	deferred_bind_flags.clear();
+}
+
+void PropagateDeferredBindFlags()
+{
+	// A chain like "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" can
+	// be parsed in either order, and the one-hop propagation done while
+	// parsing only sees the flags dst has at that moment. Walk the edges
+	// until nothing changes so flags flow through the whole chain
+	// regardless of parse order.
+	bool changed;
+	do {
+		changed = false;
+		for (const auto& edge : deferred_bind_flags) {
+			CustomResource* src = edge.first;
+			CustomResource* dst = edge.second;
+
+			if (!(dst->bind_flags & ~src->bind_flags) && !(dst->misc_flags & ~src->misc_flags))
+				continue;
+
+			D3D11_BIND_FLAG old_bind_flags = src->bind_flags;
+			D3D11_RESOURCE_MISC_FLAG old_misc_flags = src->misc_flags;
+
+			// Incompatible flags (e.g. constant_buffer) are warned about by
+			// AddFlags and leave src unchanged, so they cannot loop forever.
+			src->AddFlags(dst->bind_flags, dst->misc_flags, true);
+
+			if (src->bind_flags != old_bind_flags || src->misc_flags != old_misc_flags)
+				changed = true;
+		}
+	} while (changed);
+
+	deferred_bind_flags.clear();
+}
+
+#pragma endregion DeferredBindFlags
+
+
 #pragma region PoolCopyOperation
 
 static CommandListCommand* parse_pool_copy_operation(
@@ -8370,6 +8434,7 @@ static CommandListCommand* parse_pool_copy_operation(
 			return nullptr;
 		}
 		src.custom_resource_pool->PropagateFlags(dst.custom_resource_pool->resource_template->bind_flags, dst.custom_resource_pool->resource_template->misc_flags);
+		DeferBindFlagsPropagation(src.custom_resource_pool->resource_template, dst.custom_resource_pool->resource_template);
 		break;
 
 	case ResourceCopyTargetType::EMPTY:
@@ -8520,6 +8585,10 @@ static CommandListCommand* parse_resource_copy_operation(
 			LogOverlayW(LOG_WARNING, L"To use resources with incompatible flags explicitly add 'copy' keyword, e.g. 'vs-cb0 = copy ResourceRWBufferCB'\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
 		}
+		// dst may gain more flags from sections parsed after this one,
+		// resolved by PropagateDeferredBindFlags() once parsing is complete.
+		if (dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE || dst.type == ResourceCopyTargetType::POOL)
+			DeferBindFlagsPropagation(src_custom_resource, dst.GetCustomResource(nullptr));
 	}
 
 	ResourceCopyOperation* operation = new ResourceCopyOperation();
@@ -9927,7 +9996,7 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 			}
 
 			// Run Fuzzy Matching.
-			find_texture_overrides_for_resource_desc(resource, matches, state->call_info);
+			find_fuzzy_texture_overrides_for_resource(resource, matches, state->call_info);
 		}
 	}
 	else
