@@ -3820,6 +3820,18 @@ float CommandListOperand::evaluate(CommandListState *state, HackerDevice *device
 	return 0;
 }
 
+float CommandListIncrement::evaluate(CommandListState *state, HackerDevice *device)
+{
+	float orig = var->fval;
+
+	var->fval = orig + delta;
+
+	if (var->flags & VariableFlags::PERSIST)
+		G->user_config_dirty = true;
+
+	return postfix ? orig : var->fval;
+}
+
 bool CommandListOperand::static_evaluate(float *ret, HackerDevice *device, bool evaluate_variables)
 {
 	switch (type) {
@@ -4752,6 +4764,7 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 	size_t friendly_pos = 0;
 	int i;
 	bool last_was_operand = false;
+	float prefix_delta = 0; // ++$x / --$x: applies to the operand that follows
 
 	LogDebug("    Tokenising \"%S\"\n", expr.c_str());
 
@@ -4770,6 +4783,16 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 		remain = expr.substr(pos);
 
 		bool matched = false;
+
+		// Prefix increment / decrement, only when glued to a variable so
+		// "- -$x" and "$a - -$b" keep working:
+		if (remain.size() > 2 && (remain[0] == L'+' || remain[0] == L'-') && remain[1] == remain[0] && remain[2] == L'$')
+		{
+			prefix_delta = remain[0] == L'+' ? 1.0f : -1.0f;
+			LogDebug("      Prefix %s\n", prefix_delta > 0 ? "++" : "--");
+			pos += 2;
+			continue;
+		}
 
 		// Operators:
 		for (i = 0; i < ARRAYSIZE(operator_tokens); i++)
@@ -4976,7 +4999,29 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 
 import_operand:
 
-		tree->tokens.emplace_back(std::move(operand));
+		// Postfix increment / decrement glued to the operand ($x++):
+		float postfix_delta = 0;
+		if (pos + 1 < expr.size() && (expr[pos] == L'+' || expr[pos] == L'-') && expr[pos + 1] == expr[pos])
+			postfix_delta = expr[pos] == L'+' ? 1.0f : -1.0f;
+
+		if (prefix_delta != 0 || postfix_delta != 0)
+		{
+			if (operand->type != ParamOverrideType::VARIABLE || (prefix_delta != 0 && postfix_delta != 0))
+				throw CommandListSyntaxError(L"++ and -- can only be applied to a variable", friendly_pos);
+
+			bool postfix = postfix_delta != 0;
+			float delta = postfix ? postfix_delta : prefix_delta;
+			if (postfix)
+				pos += 2;
+			token = postfix ? token + (delta > 0 ? L"++" : L"--") : (delta > 0 ? L"++" : L"--") + token;
+			LogDebug("      Increment: \"%S\"\n", token.c_str());
+			tree->tokens.emplace_back(make_shared<CommandListIncrement>(friendly_pos, token, operand->var, delta, postfix));
+			prefix_delta = 0;
+		}
+		else
+		{
+			tree->tokens.emplace_back(std::move(operand));
+		}
 
 		if (last_was_operand)
 		{
@@ -5875,6 +5920,7 @@ bool CommandListOperand::parse_variable(const wstring* operand, const wstring* i
 		parse_command_list_var_name(*operand, ini_namespace, &var)) {
 		type = ParamOverrideType::VARIABLE;
 		var_ftarget = &var->fval;
+		this->var = var;
 		return operand_allowed_in_context(type, scope);
 	}
 	return false;
@@ -9247,11 +9293,13 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val, co
 	};
 
 	if (*key) {
-		wstring lhs = key;
+		// The ini reader split "$x += 1" at the "=", leaving the operator
+		// at the end of the key:
+		size_t key_len = wcslen(key);
 		for (const wchar_t *candidate : compound_operators) {
 			size_t len = wcslen(candidate);
-			if (lhs.size() > len && !lhs.compare(lhs.size() - len, len, candidate)) {
-				*target = lhs.substr(0, lhs.size() - len);
+			if (key_len > len && !wcscmp(key + key_len - len, candidate)) {
+				target->assign(key, key_len - len);
 				*op = candidate;
 				*rhs = *val;
 				break;
@@ -9311,10 +9359,13 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 
 	bool parsed;
 	if (target[0] == L'$' && target.back() == L']') {
-		// Pool variable: $PoolFoo[$i]
+		// Pool variable: $PoolFoo[$i]. Same as in
+		// ParseCommandListResourceCopyTargetDirective, an unresolved pool
+		// variable still parses as VARIABLE and is left to
+		// parse_pool_variable_operation to reject or record:
 		ResourceCopyTarget dst;
-		dst.ParseTarget(target.c_str(), false, ini_namespace, command_list->scope);
-		if (dst.evaluation_mode != ResourceCopyTargetEvaluationMode::VARIABLE)
+		if (!dst.ParseTarget(target.c_str(), false, ini_namespace, command_list->scope)
+			&& dst.evaluation_mode != ResourceCopyTargetEvaluationMode::VARIABLE)
 			return false;
 		CommandListCommand *operation = parse_pool_variable_operation(section, dst, &rhs, command_list, ini_namespace, target.c_str(), &op);
 		if (!operation)
@@ -9330,7 +9381,8 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 	if (!parsed)
 		return false;
 
-	// Frame analysis log shows the line as written:
+	// Frame analysis log shows the line as written ("$x +" + "= 1" when
+	// there is no raw line to take it from):
 	command_list->commands.back()->ini_line = L"[" + wstring(section) + L"] " + (raw_line ? *raw_line : wstring(key) + L"= " + *val);
 	return true;
 }
