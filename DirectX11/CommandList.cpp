@@ -5434,47 +5434,47 @@ static void log_syntax_tree(T token, const char *msg)
 // finalises it. Syntax errors propagate as CommandListSyntaxError, like
 // from tokenise(): the caller catches both and reports them against the
 // text it built the tokens from.
-static std::shared_ptr<CommandListEvaluatable> transform_expression(CommandListSyntaxTree *tree, uint32_t operator_mask)
+static std::shared_ptr<CommandListEvaluatable> transform_expression(CommandListSyntaxTree &tree, uint32_t operator_mask)
 {
-	group_parenthesis(tree);
+	group_parenthesis(&tree);
 
 	if (operator_mask & OP_UNARY)
-		transform_operators_recursive(tree, unary_operators, ARRAYSIZE(unary_operators), true, true);
+		transform_operators_recursive(&tree, unary_operators, ARRAYSIZE(unary_operators), true, true);
 
 	if (operator_mask & OP_EXPONENT)
-		transform_operators_recursive(tree, exponent_operators, ARRAYSIZE(exponent_operators), true, false);
+		transform_operators_recursive(&tree, exponent_operators, ARRAYSIZE(exponent_operators), true, false);
 
 	if (operator_mask & OP_MULTIPLICATION)
-		transform_operators_recursive(tree, multi_division_operators, ARRAYSIZE(multi_division_operators), false, false);
+		transform_operators_recursive(&tree, multi_division_operators, ARRAYSIZE(multi_division_operators), false, false);
 
 	if (operator_mask & OP_ADD_SUBTRACT)
-		transform_operators_recursive(tree, add_subtract_operators, ARRAYSIZE(add_subtract_operators), false, false);
+		transform_operators_recursive(&tree, add_subtract_operators, ARRAYSIZE(add_subtract_operators), false, false);
 
 	if (operator_mask & OP_SHIFT)
-		transform_operators_recursive(tree, shift_operators, ARRAYSIZE(shift_operators), false, false);
+		transform_operators_recursive(&tree, shift_operators, ARRAYSIZE(shift_operators), false, false);
 
 	if (operator_mask & OP_RELATIONAL)
-		transform_operators_recursive(tree, relational_operators, ARRAYSIZE(relational_operators), false, false);
+		transform_operators_recursive(&tree, relational_operators, ARRAYSIZE(relational_operators), false, false);
 
 	if (operator_mask & OP_EQUALITY)
-		transform_operators_recursive(tree, equality_operators, ARRAYSIZE(equality_operators), false, false);
+		transform_operators_recursive(&tree, equality_operators, ARRAYSIZE(equality_operators), false, false);
 
 	if (operator_mask & OP_BITWISE_AND)
-		transform_operators_recursive(tree, bitwise_and_operators, ARRAYSIZE(bitwise_and_operators), false, false);
+		transform_operators_recursive(&tree, bitwise_and_operators, ARRAYSIZE(bitwise_and_operators), false, false);
 
 	if (operator_mask & OP_BITWISE_XOR)
-		transform_operators_recursive(tree, bitwise_xor_operators, ARRAYSIZE(bitwise_xor_operators), false, false);
+		transform_operators_recursive(&tree, bitwise_xor_operators, ARRAYSIZE(bitwise_xor_operators), false, false);
 
 	if (operator_mask & OP_BITWISE_OR)
-		transform_operators_recursive(tree, bitwise_or_operators, ARRAYSIZE(bitwise_or_operators), false, false);
+		transform_operators_recursive(&tree, bitwise_or_operators, ARRAYSIZE(bitwise_or_operators), false, false);
 
 	if (operator_mask & OP_AND)
-		transform_operators_recursive(tree, and_operators, ARRAYSIZE(and_operators), false, false);
+		transform_operators_recursive(&tree, and_operators, ARRAYSIZE(and_operators), false, false);
 
 	if (operator_mask & OP_OR)
-		transform_operators_recursive(tree, or_operators, ARRAYSIZE(or_operators), false, false);
+		transform_operators_recursive(&tree, or_operators, ARRAYSIZE(or_operators), false, false);
 
-	return tree->finalise();
+	return tree.finalise();
 }
 
 static void log_expression_syntax_error(const wstring *expression, const CommandListSyntaxError &e)
@@ -5492,7 +5492,7 @@ bool CommandListExpression::parse(const wstring *expression, const wstring *ini_
 
 	try {
 		tokenise(expression, &tree, ini_namespace, scope, &operator_mask);
-		evaluatable = transform_expression(&tree, operator_mask);
+		evaluatable = transform_expression(tree, operator_mask);
 		log_syntax_tree(evaluatable, "Final syntax tree:\n");
 		return true;
 	} catch (const CommandListSyntaxError &e) {
@@ -5506,32 +5506,26 @@ bool CommandListExpression::parse_compound(const wstring *target, const wstring 
 	CommandListSyntaxTree tree(0);
 	uint32_t operator_mask = 0;
 
-	// "$x += 1" evaluates as "$x + (1)": the target is tokenised as the left
-	// operand, the right hand side is parenthesised so it is evaluated as a
-	// whole. Only the diagnostics need the combined text, for the caret:
-	wstring display = *target + L" " + *op + L" (" + *rhs + L")";
-	size_t op_pos = target->size() + 1;
-	size_t rhs_pos = op_pos + op->size() + 2;
-
+	// "$x += 1" evaluates as "$x + (1)": the target becomes the left operand
+	// and the right hand side is parenthesised so it is evaluated as a
+	// whole. The target was validated by the assignment parser, so any
+	// syntax error is in the right hand side and is reported against it:
 	try {
 		tokenise(target, &tree, ini_namespace, scope, &operator_mask);
 
 		operator_mask |= GetOperatorMask(op->c_str(), op->size());
-		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(op_pos, *op));
-		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(rhs_pos - 1, L"("));
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(0, *op));
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(0, L"("));
 
-		size_t lhs_tokens = tree.tokens.size();
 		tokenise(rhs, &tree, ini_namespace, scope, &operator_mask);
-		for (size_t i = lhs_tokens; i < tree.tokens.size(); i++)
-			tree.tokens[i]->token_pos += rhs_pos;
 
-		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(display.size() - 1, L")"));
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(rhs->size(), L")"));
 
-		evaluatable = transform_expression(&tree, operator_mask);
+		evaluatable = transform_expression(tree, operator_mask);
 		log_syntax_tree(evaluatable, "Final syntax tree:\n");
 		return true;
 	} catch (const CommandListSyntaxError &e) {
-		log_expression_syntax_error(&display, e);
+		log_expression_syntax_error(rhs, e);
 		return false;
 	}
 }
@@ -9241,17 +9235,6 @@ bool ParseCommandListResourceCopyTargetDirective(
 
 #pragma region CompoundAssignment
 
-static void trim_whitespace(wstring *str)
-{
-	size_t first = str->find_first_not_of(L" \t");
-	if (first == wstring::npos) {
-		str->clear();
-		return;
-	}
-	size_t last = str->find_last_not_of(L" \t");
-	*str = str->substr(first, last - first + 1);
-}
-
 // Splits "$x +" / "1" (from "$x += 1") or "++$x" / "$x--" (a line without "=",
 // only seen in raw_line) into target, binary operator and right hand side.
 static bool split_compound_assignment(const wchar_t *key, const wstring *val, const wstring *raw_line,
@@ -9295,7 +9278,8 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val, co
 	if (op->empty() || rhs->empty())
 		return false;
 
-	trim_whitespace(target);
+	// "$x +" keeps the space before the operator:
+	target->erase(target->find_last_not_of(L" \t") + 1);
 	return !target->empty();
 }
 
@@ -9321,7 +9305,6 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 		} else if (!target.compare(0, 4, L"pre ")) {
 			target = target.substr(4);
 		}
-		trim_whitespace(&target);
 	}
 
 	bool parsed;
