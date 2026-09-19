@@ -880,10 +880,6 @@ void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches* match
 void find_texture_overrides_by_hash_from_fuzzy_matches(uint32_t hash, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resource* resource, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 
-// Memoised lookup, see TextureOverrideCandidates. Returns NULL for resources
-// without handle info, i.e. created by 3DMigoto or the swap chain, which
-// then use the uncached path.
-TextureOverrideCandidates* get_texture_override_candidates(ID3D11Resource* resource);
 void find_fuzzy_texture_overrides_for_resource(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 void InvalidateTextureOverrideCandidates();
 
