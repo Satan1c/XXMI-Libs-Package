@@ -9292,20 +9292,22 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
-	wstring target, op, rhs;
+	wstring target, op, rhs, line;
+
+	// "post ++$x" has no "=", so the pre/post prefix is still on the line:
+	if (!*key && raw_line) {
+		line = *raw_line;
+		if (post_command_list && !line.compare(0, 5, L"post ")) {
+			line = line.substr(5);
+			command_list = post_command_list;
+		} else if (post_command_list && !line.compare(0, 4, L"pre ")) {
+			line = line.substr(4);
+		}
+		raw_line = &line;
+	}
 
 	if (!split_compound_assignment(key, val, raw_line, &target, &op, &rhs))
 		return false;
-
-	// "post $x++" has no "=", so the pre/post prefix is still on the line:
-	if (!*key && post_command_list) {
-		if (!target.compare(0, 5, L"post ")) {
-			target = target.substr(5);
-			command_list = post_command_list;
-		} else if (!target.compare(0, 4, L"pre ")) {
-			target = target.substr(4);
-		}
-	}
 
 	bool parsed;
 	if (target[0] == L'$' && target.back() == L']') {
