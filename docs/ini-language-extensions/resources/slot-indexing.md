@@ -119,9 +119,3 @@ CheckTextureOverride = ps-t[0:9]  ; Same as CheckTextureOverride = ps-t0 ... ps-
 ```
 
 Pool ranges and the bare `<stage>-t` form are not supported by `CheckTextureOverride`. Other commands do not accept ranges.
-
-### Performance
-
-Adjacent single-slot `ref` lines are merged into the same kind of batched call automatically. See [Slot Operation Batching](../command-lists/README.md/#slot-operation-batching) for details.
-
-A slot range expresses the same thing explicitly and additionally supports runtime bounds, ranges on `u` and `cb` slots, and pools as a whole.

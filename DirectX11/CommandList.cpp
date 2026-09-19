@@ -49,9 +49,11 @@ struct command_list_profiling_state {
 	LARGE_INTEGER saved_recursive_time;
 };
 
-// Bumped whenever the profiling sets are cleared. A list/command whose
-// generation doesn't match registers itself again - cheaper than a set
-// insert on every execution:
+// Command lists and commands register themselves in the profiling sets the
+// first time they run in a collection window. The generation counter lets
+// them notice a new window from a cheap compare instead of a set insert on
+// every execution, which at thousands of executions per frame was a
+// measurable chunk of the "Command lists total" it reports:
 static unsigned profiling_generation = 1;
 
 void clear_command_list_profiling()
@@ -5428,61 +5430,108 @@ static void log_syntax_tree(T token, const char *msg)
 
 #pragma region CommandListExpressions
 
+// Applies the operator precedence passes to a tokenised expression and
+// finalises it. Syntax errors propagate as CommandListSyntaxError, like
+// from tokenise(): the caller catches both and reports them against the
+// text it built the tokens from.
+static std::shared_ptr<CommandListEvaluatable> transform_expression(CommandListSyntaxTree *tree, uint32_t operator_mask)
+{
+	group_parenthesis(tree);
+
+	if (operator_mask & OP_UNARY)
+		transform_operators_recursive(tree, unary_operators, ARRAYSIZE(unary_operators), true, true);
+
+	if (operator_mask & OP_EXPONENT)
+		transform_operators_recursive(tree, exponent_operators, ARRAYSIZE(exponent_operators), true, false);
+
+	if (operator_mask & OP_MULTIPLICATION)
+		transform_operators_recursive(tree, multi_division_operators, ARRAYSIZE(multi_division_operators), false, false);
+
+	if (operator_mask & OP_ADD_SUBTRACT)
+		transform_operators_recursive(tree, add_subtract_operators, ARRAYSIZE(add_subtract_operators), false, false);
+
+	if (operator_mask & OP_SHIFT)
+		transform_operators_recursive(tree, shift_operators, ARRAYSIZE(shift_operators), false, false);
+
+	if (operator_mask & OP_RELATIONAL)
+		transform_operators_recursive(tree, relational_operators, ARRAYSIZE(relational_operators), false, false);
+
+	if (operator_mask & OP_EQUALITY)
+		transform_operators_recursive(tree, equality_operators, ARRAYSIZE(equality_operators), false, false);
+
+	if (operator_mask & OP_BITWISE_AND)
+		transform_operators_recursive(tree, bitwise_and_operators, ARRAYSIZE(bitwise_and_operators), false, false);
+
+	if (operator_mask & OP_BITWISE_XOR)
+		transform_operators_recursive(tree, bitwise_xor_operators, ARRAYSIZE(bitwise_xor_operators), false, false);
+
+	if (operator_mask & OP_BITWISE_OR)
+		transform_operators_recursive(tree, bitwise_or_operators, ARRAYSIZE(bitwise_or_operators), false, false);
+
+	if (operator_mask & OP_AND)
+		transform_operators_recursive(tree, and_operators, ARRAYSIZE(and_operators), false, false);
+
+	if (operator_mask & OP_OR)
+		transform_operators_recursive(tree, or_operators, ARRAYSIZE(or_operators), false, false);
+
+	return tree->finalise();
+}
+
+static void log_expression_syntax_error(const wstring *expression, const CommandListSyntaxError &e)
+{
+	LogOverlay(LOG_WARNING_MONOSPACE,
+			"Syntax Error: %S\n"
+			"              %*s: %S\n",
+			expression->c_str(), (int)e.pos+1, "^", e.msg.c_str());
+}
+
 bool CommandListExpression::parse(const wstring *expression, const wstring *ini_namespace, CommandListScope *scope)
 {
 	CommandListSyntaxTree tree(0);
-
 	uint32_t operator_mask = 0;
 
 	try {
 		tokenise(expression, &tree, ini_namespace, scope, &operator_mask);
-
-		group_parenthesis(&tree);
-
-		if (operator_mask & OP_UNARY)
-			transform_operators_recursive(&tree, unary_operators, ARRAYSIZE(unary_operators), true, true);
-
-		if (operator_mask & OP_EXPONENT)
-			transform_operators_recursive(&tree, exponent_operators, ARRAYSIZE(exponent_operators), true, false);
-
-		if (operator_mask & OP_MULTIPLICATION)
-			transform_operators_recursive(&tree, multi_division_operators, ARRAYSIZE(multi_division_operators), false, false);
-
-		if (operator_mask & OP_ADD_SUBTRACT)
-			transform_operators_recursive(&tree, add_subtract_operators, ARRAYSIZE(add_subtract_operators), false, false);
-
-		if (operator_mask & OP_SHIFT)
-			transform_operators_recursive(&tree, shift_operators, ARRAYSIZE(shift_operators), false, false);
-
-		if (operator_mask & OP_RELATIONAL)
-			transform_operators_recursive(&tree, relational_operators, ARRAYSIZE(relational_operators), false, false);
-
-		if (operator_mask & OP_EQUALITY)
-			transform_operators_recursive(&tree, equality_operators, ARRAYSIZE(equality_operators), false, false);
-
-		if (operator_mask & OP_BITWISE_AND)
-			transform_operators_recursive(&tree, bitwise_and_operators, ARRAYSIZE(bitwise_and_operators), false, false);
-
-		if (operator_mask & OP_BITWISE_XOR)
-			transform_operators_recursive(&tree, bitwise_xor_operators, ARRAYSIZE(bitwise_xor_operators), false, false);
-
-		if (operator_mask & OP_BITWISE_OR)
-			transform_operators_recursive(&tree, bitwise_or_operators, ARRAYSIZE(bitwise_or_operators), false, false);
-
-		if (operator_mask & OP_AND)
-			transform_operators_recursive(&tree, and_operators, ARRAYSIZE(and_operators), false, false);
-
-		if (operator_mask & OP_OR)
-			transform_operators_recursive(&tree, or_operators, ARRAYSIZE(or_operators), false, false);
-
-		evaluatable = tree.finalise();
+		evaluatable = transform_expression(&tree, operator_mask);
 		log_syntax_tree(evaluatable, "Final syntax tree:\n");
 		return true;
 	} catch (const CommandListSyntaxError &e) {
-		LogOverlay(LOG_WARNING_MONOSPACE,
-				"Syntax Error: %S\n"
-				"              %*s: %S\n",
-				expression->c_str(), (int)e.pos+1, "^", e.msg.c_str());
+		log_expression_syntax_error(expression, e);
+		return false;
+	}
+}
+
+bool CommandListExpression::parse_compound(const wstring *target, const wstring *op, const wstring *rhs, const wstring *ini_namespace, CommandListScope *scope)
+{
+	CommandListSyntaxTree tree(0);
+	uint32_t operator_mask = 0;
+
+	// "$x += 1" evaluates as "$x + (1)": the target is tokenised as the left
+	// operand, the right hand side is parenthesised so it is evaluated as a
+	// whole. Only the diagnostics need the combined text, for the caret:
+	wstring display = *target + L" " + *op + L" (" + *rhs + L")";
+	size_t op_pos = target->size() + 1;
+	size_t rhs_pos = op_pos + op->size() + 2;
+
+	try {
+		tokenise(target, &tree, ini_namespace, scope, &operator_mask);
+
+		operator_mask |= GetOperatorMask(op->c_str(), op->size());
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(op_pos, *op));
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(rhs_pos - 1, L"("));
+
+		size_t lhs_tokens = tree.tokens.size();
+		tokenise(rhs, &tree, ini_namespace, scope, &operator_mask);
+		for (size_t i = lhs_tokens; i < tree.tokens.size(); i++)
+			tree.tokens[i]->token_pos += rhs_pos;
+
+		tree.tokens.emplace_back(make_shared<CommandListOperatorToken>(display.size() - 1, L")"));
+
+		evaluatable = transform_expression(&tree, operator_mask);
+		log_syntax_tree(evaluatable, "Final syntax tree:\n");
+		return true;
+	} catch (const CommandListSyntaxError &e) {
+		log_expression_syntax_error(&display, e);
 		return false;
 	}
 }
@@ -5930,14 +5979,18 @@ bool CommandListOperand::parse_ini_keywords(const wstring* operand, const wstrin
 // w4 = res_width / res_height (set parameter to resolution width/height)
 bool ParseCommandListIniParamOverride(const wchar_t *section,
 		const wchar_t *key, wstring *val, CommandList *command_list,
-		const wstring *ini_namespace)
+		const wstring *ini_namespace, const wstring *compound_op)
 {
 	ParamOverride *param = new ParamOverride();
 
 	if (!ParseIniParamName(key, &param->param_idx, &param->param_component))
 		goto bail;
 
-	if (!param->expression.parse(val, ini_namespace, command_list->scope))
+	if (compound_op) {
+		wstring target = key;
+		if (!param->expression.parse_compound(&target, compound_op, val, ini_namespace, command_list->scope))
+			goto bail;
+	} else if (!param->expression.parse(val, ini_namespace, command_list->scope))
 		goto bail;
 
 	// Reserve space in IniParams for this variable:
@@ -5954,7 +6007,7 @@ bail:
 bool ParseCommandListVariableAssignment(const wchar_t *section,
 		const wchar_t *key, wstring *val, const wstring *raw_line,
 		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
-		const wstring *ini_namespace)
+		const wstring *ini_namespace, const wstring *compound_op)
 {
 	wstring line = key;
 
@@ -6031,7 +6084,10 @@ bool ParseCommandListVariableAssignment(const wchar_t *section,
 
 	command->var = var;
 
-	if (!command->expression.parse(val, ini_namespace, command_list->scope))
+	if (compound_op) {
+		if (!command->expression.parse_compound(&name, compound_op, val, ini_namespace, command_list->scope))
+			goto bail;
+	} else if (!command->expression.parse(val, ini_namespace, command_list->scope))
 		goto bail;
 
 	command->ini_line = L"[" + wstring(section) + L"] " + line + L" = " + *val;
@@ -8347,9 +8403,11 @@ IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& targ
 			return expression_ret;
 	}
 
-	// Bare "ps-t" / "ps-u" / "ps-cb": a slot range taking its bounds from
-	// the other side (ps-t = ref PoolFoo[0:9]). Exactly the keyword only -
-	// "ps-t0" falls through to the numeric slot parsing below.
+	// Bare "ps-t" / "ps-u" / "ps-cb": a slot range whose bounds come from
+	// the other side of the assignment (ps-t = ref PoolFoo[0:9]).
+	// Only matches when the suffix is *exactly* the keyword with nothing
+	// trailing (no slot digits) - anything else (e.g. "ps-t0") must fall
+	// through to the numeric slot parsing below.
 	if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE && length >= 4
 		&& is_shader_resource(target[0]) && target[1] == L's' && target[2] == L'-')
 	{
@@ -8581,9 +8639,11 @@ void ClearDeferredBindFlags()
 
 void PropagateDeferredBindFlags()
 {
-	// "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" may be parsed in
-	// either order, so the one-hop propagation at parse time can miss flags
-	// dst gains later. Iterate to a fixed point:
+	// A chain like "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" can
+	// be parsed in either order, and the one-hop propagation done while
+	// parsing only sees the flags dst has at that moment. Walk the edges
+	// until nothing changes so flags flow through the whole chain
+	// regardless of parse order.
 	bool changed;
 	do {
 		changed = false;
@@ -8634,7 +8694,6 @@ static CommandListCommand* parse_pool_copy_operation(
 			return nullptr;
 		}
 		src.custom_resource_pool->PropagateFlags(dst.custom_resource_pool->resource_template->bind_flags, dst.custom_resource_pool->resource_template->misc_flags);
-		// Again after parsing, for flags dst gains from later sections:
 		DeferBindFlagsPropagation(src.custom_resource_pool->resource_template, dst.custom_resource_pool->resource_template);
 		break;
 
@@ -8786,7 +8845,8 @@ static CommandListCommand* parse_resource_copy_operation(
 			LogOverlayW(LOG_WARNING, L"To use resources with incompatible flags explicitly add 'copy' keyword, e.g. 'vs-cb0 = copy ResourceRWBufferCB'\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
 		}
-		// Again after parsing, for flags dst gains from later sections:
+		// dst may gain more flags from sections parsed after this one,
+		// resolved by PropagateDeferredBindFlags() once parsing is complete.
 		if (dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE || dst.type == ResourceCopyTargetType::POOL)
 			DeferBindFlagsPropagation(src_custom_resource, dst.GetCustomResource(nullptr));
 	}
@@ -8809,7 +8869,6 @@ static CommandListCommand* parse_layout_operation(
 	const wchar_t* section, ResourceCopyTarget& dst, wstring* val, CommandList* command_list, const wstring* ini_namespace
 )
 {
-	// Layout overrides need a fixed slot, not vb[$i]:
 	if (dst.type != ResourceCopyTargetType::VERTEX_BUFFER || dst.slot_expression)
 		return nullptr;
 
@@ -8907,7 +8966,8 @@ void LayoutElementOperation::run(CommandListState* state)
 #pragma region PoolVariableOperation
 
 CommandListCommand* parse_pool_variable_operation(
-	const wchar_t *section, ResourceCopyTarget& dst, wstring *val, CommandList *command_list, const wstring *ini_namespace, const wchar_t* key
+	const wchar_t *section, ResourceCopyTarget& dst, wstring *val, CommandList *command_list, const wstring *ini_namespace, const wchar_t* key,
+	const wstring *compound_op = NULL
 )
 {
 	//LogInfoW(L"parse_pool_variable_operation dst_type=%ls, dst_mode=%ls, val=%ls\n",
@@ -8937,7 +8997,11 @@ CommandListCommand* parse_pool_variable_operation(
 
 	PoolVariableOperation* command = new PoolVariableOperation();
 
-	if (!command->expression.parse(val, ini_namespace, command_list->scope))
+	if (compound_op) {
+		wstring target = key;
+		if (!command->expression.parse_compound(&target, compound_op, val, ini_namespace, command_list->scope))
+			goto bail;
+	} else if (!command->expression.parse(val, ini_namespace, command_list->scope))
 		goto bail;
 
 	command->dst = std::move(dst);
@@ -9175,6 +9239,118 @@ bool ParseCommandListResourceCopyTargetDirective(
 	return true;
 }
 
+#pragma region CompoundAssignment
+
+static void trim_whitespace(wstring *str)
+{
+	size_t first = str->find_first_not_of(L" \t");
+	if (first == wstring::npos) {
+		str->clear();
+		return;
+	}
+	size_t last = str->find_last_not_of(L" \t");
+	*str = str->substr(first, last - first + 1);
+}
+
+// Splits "$x +" / "1" (from "$x += 1") or "++$x" / "$x--" (a line without "=",
+// only seen in raw_line) into target, binary operator and right hand side.
+static bool split_compound_assignment(const wchar_t *key, const wstring *val, const wstring *raw_line,
+		wstring *target, wstring *op, wstring *rhs)
+{
+	// Longest first so "<<" is not taken as "<":
+	static const wchar_t *compound_operators[] = {
+		L"**", L"//", L"<<", L">>", L"&&", L"||",
+		L"+", L"-", L"*", L"/", L"%", L"&", L"|", L"^",
+	};
+
+	if (*key) {
+		wstring lhs = key;
+		for (const wchar_t *candidate : compound_operators) {
+			size_t len = wcslen(candidate);
+			if (lhs.size() > len && !lhs.compare(lhs.size() - len, len, candidate)) {
+				*target = lhs.substr(0, lhs.size() - len);
+				*op = candidate;
+				*rhs = *val;
+				break;
+			}
+		}
+	} else if (raw_line) {
+		wstring line = *raw_line;
+		size_t len = line.size();
+		if (len < 3)
+			return false;
+		wstring head = line.substr(0, 2), tail = line.substr(len - 2);
+		if (head == L"++" || head == L"--") {
+			*target = line.substr(2);
+			*op = head.substr(0, 1);
+		} else if (tail == L"++" || tail == L"--") {
+			*target = line.substr(0, len - 2);
+			*op = tail.substr(0, 1);
+		} else {
+			return false;
+		}
+		*rhs = L"1";
+	}
+
+	if (op->empty() || rhs->empty())
+		return false;
+
+	trim_whitespace(target);
+	return !target->empty();
+}
+
+// $x += 1, x0 *= 2, $PoolFoo[$i] |= 4 and every other binary operator, plus
+// ++$x / $x++ / --$x / $x--. The target's own assignment parser builds the
+// command, with the expression "target op (rhs)" assembled by
+// CommandListExpression::parse_compound.
+bool ParseCommandListCompoundAssignment(const wchar_t *section,
+		const wchar_t *key, wstring *val, const wstring *raw_line,
+		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
+		const wstring *ini_namespace)
+{
+	wstring target, op, rhs;
+
+	if (!split_compound_assignment(key, val, raw_line, &target, &op, &rhs))
+		return false;
+
+	// "post $x++" has no "=", so the pre/post prefix is still on the line:
+	if (!*key && post_command_list) {
+		if (!target.compare(0, 5, L"post ")) {
+			target = target.substr(5);
+			command_list = post_command_list;
+		} else if (!target.compare(0, 4, L"pre ")) {
+			target = target.substr(4);
+		}
+		trim_whitespace(&target);
+	}
+
+	bool parsed;
+	if (target[0] == L'$' && target.back() == L']') {
+		// Pool variable: $PoolFoo[$i]
+		ResourceCopyTarget dst;
+		dst.ParseTarget(target.c_str(), false, ini_namespace, command_list->scope);
+		if (dst.evaluation_mode != ResourceCopyTargetEvaluationMode::VARIABLE)
+			return false;
+		CommandListCommand *operation = parse_pool_variable_operation(section, dst, &rhs, command_list, ini_namespace, target.c_str(), &op);
+		if (!operation)
+			return false;
+		command_list->commands.push_back(std::shared_ptr<CommandListCommand>(operation));
+		parsed = true;
+	} else if (target[0] == L'$') {
+		parsed = ParseCommandListVariableAssignment(section, target.c_str(), &rhs, NULL, command_list, pre_command_list, post_command_list, ini_namespace, &op);
+	} else {
+		parsed = ParseCommandListIniParamOverride(section, target.c_str(), &rhs, command_list, ini_namespace, &op);
+	}
+
+	if (!parsed)
+		return false;
+
+	// Frame analysis log shows the line as written:
+	command_list->commands.back()->ini_line = L"[" + wstring(section) + L"] " + (raw_line ? *raw_line : wstring(key) + L"= " + *val);
+	return true;
+}
+
+#pragma endregion CompoundAssignment
 
 #pragma region ParseFlowControl
 
@@ -10268,7 +10444,10 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 				}
 			}
 
-			// Run Fuzzy Matching.
+			// Run Fuzzy Matching. Fuzzy candidates depend on the resource
+			// description only, not on the region, so the per resource
+			// cache applies here too - but only its fuzzy list, hash matching
+			// was done above by region_hash.
 			find_fuzzy_texture_overrides_for_resource(resource, matches, state->call_info);
 		}
 	}
@@ -12495,8 +12674,6 @@ void ResourceCopyOperation::CopyResourceToPool(
 	dst.SetCustomResource(nullptr);
 }
 
-// Inside a ShaderResourceBindBatch the view is handed back to the batch
-// instead of being bound:
 void ResourceCopyOperation::SetOrDeferResource(CommandListState *state,
 		ID3D11Resource *res, ID3D11View *view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size)
 {
@@ -12602,11 +12779,9 @@ void ShaderResourceBindBatch::run(CommandListState *state)
 
 	COMMAND_LIST_LOG(state, "batched %lcs-t%u..%u {\n", shader_type, first_slot, first_slot + count - 1);
 
-	if (seed_with_current)
+	if (prefetch_current_bindings)
 		GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
-	// Each operation resolves its view as usual but hands it back through
-	// SetOrDeferResource() instead of binding it:
 	for (auto &op : operations) {
 		DeferredBinding binding;
 
@@ -12708,10 +12883,12 @@ void ConditionalSlotCopyOperation::run(CommandListState *state)
 	}
 }
 
-// Collects the branches of an if/elif/else chain if every branch is exactly
-// one batchable operation on the same stage+slot (in the given direction).
-// A missing else is allowed and means "leave the current binding". Chains
-// with post commands are not handled.
+// Walks a simple if/elif/else chain, checking that every reachable branch
+// either contains exactly one qualifying (bind ? is_batchable_bind :
+// is_batchable_fetch) operation for the same fixed stage+slot, or is empty
+// (only valid for the final branch, meaning "leave the current binding" -
+// the same thing unless_null already does for a batch). Mixing pre/post
+// within the chain is out of scope and bails out.
 static bool collect_conditional_slot_chain(IfCommand *if_cmd, bool bind, wchar_t stage, unsigned slot,
 	std::vector<ConditionalSlotBranch> &out)
 {
@@ -12778,8 +12955,10 @@ static std::shared_ptr<ResourceCopyOperation> try_fold_conditional_slot_op(std::
 		return nullptr;
 
 	merged->bind = bind;
-	// ResourceCopyTarget isn't copyable; the batcher only needs the fields
-	// it groups by, the copy itself is done by the matched branch's op:
+	// Only the handful of scalar fields the optimiser's grouping logic
+	// reads: ResourceCopyTarget isn't copyable (it owns unique_ptr
+	// expressions), and merged->dst/src are never used for the real copy -
+	// each run() delegates entirely to the matched branch's own operation:
 	ResourceCopyTarget &fixed_side = bind ? merged->dst : merged->src;
 	const ResourceCopyTarget &fixed_side_src = bind ? true_op->dst : true_op->src;
 	fixed_side.type = fixed_side_src.type;
@@ -12793,71 +12972,108 @@ static std::shared_ptr<ResourceCopyOperation> try_fold_conditional_slot_op(std::
 	return merged;
 }
 
-// Splits a run of same-stage operations into batches, appending each batch
-// (or a lone operation as is) to out. A bind batch that has to fetch the
-// current bindings anyway (unless_null) covers the whole slot span in one
-// call, with gap slots keeping their current view; otherwise the run is
-// split per contiguous slot range.
-static void emit_slot_batches(std::vector<std::shared_ptr<ResourceCopyOperation>> &run, bool bind, CommandList::Commands &out)
+// The slot side of a batchable operation: dst for binds, src for fetches.
+static const ResourceCopyTarget& slot_target(const ResourceCopyOperation *op, bool bind)
 {
-	bool seed = false;
-	std::vector<unsigned> slots;
+	return bind ? op->dst : op->src;
+}
+
+// Wraps the operations of a run that fall within [first, last] into a single
+// bind / fetch batch and appends it to out. A range holding a single
+// operation is not worth a batch, that operation is appended as is.
+static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run, bool bind,
+	unsigned first, unsigned last, bool prefetch_current_bindings, CommandList::Commands &out)
+{
+	std::shared_ptr<ShaderResourceBatch> batch;
+	if (bind)
+		batch = std::make_shared<ShaderResourceBindBatch>();
+	else
+		batch = std::make_shared<ShaderResourceFetchBatch>();
+
+	// Operations keep their ini order within the batch, so a slot assigned
+	// twice takes the last value just like it would without batching:
 	for (auto &op : run) {
-		slots.push_back(bind ? op->dst.slot : op->src.slot);
+		unsigned slot = slot_target(op.get(), bind).slot;
+		if (slot >= first && slot <= last)
+			batch->operations.push_back(op);
+	}
+
+	if (batch->operations.size() < 2) {
+		out.push_back(batch->operations[0]);
+		return;
+	}
+
+	batch->shader_type = slot_target(run[0].get(), bind).shader_type;
+	batch->first_slot = first;
+	batch->count = last - first + 1;
+	batch->prefetch_current_bindings = prefetch_current_bindings;
+	// Shown in the frame analysis log in place of the individual lines:
+	batch->ini_line = batch->operations[0]->ini_line + L" ... +" + std::to_wstring(batch->operations.size() - 1);
+	out.push_back(batch);
+}
+
+// Splits a run of same-stage, same-direction operations into batches and
+// appends them to out.
+//
+// A single XXSetShaderResources call always writes every slot in its range,
+// so a batch normally only covers slots the run actually assigns: the run is
+// split wherever the (sorted, unique) slot numbers have a gap, and each
+// contiguous range becomes its own batch.
+//
+// unless_null changes that for binds. A slot whose source turned out to be
+// null has to keep its current view, and the only way to know that view is
+// to XXGetShaderResources the range up front (prefetch_current_bindings).
+// Since the current bindings are read anyway, gaps cost nothing extra: the
+// gap slots are simply written back with the view they already had, and the
+// whole run becomes one batch spanning from the lowest to the highest slot.
+static void emit_slot_batches(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run, bool bind, CommandList::Commands &out)
+{
+	bool prefetch_current_bindings = false;
+	std::vector<unsigned> slots;
+
+	for (auto &op : run) {
+		slots.push_back(slot_target(op.get(), bind).slot);
 		if (bind && (op->options & ResourceCopyOptions::UNLESS_NULL))
-			seed = true;
+			prefetch_current_bindings = true;
 	}
 	std::sort(slots.begin(), slots.end());
 	slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
 
-	size_t range_start = 0;
-	for (size_t i = 1; i <= slots.size(); i++) {
-		if (i < slots.size() && (seed || slots[i] == slots[i - 1] + 1))
-			continue;
-
-		unsigned first = slots[range_start], last = slots[i - 1];
-		range_start = i;
-
-		std::shared_ptr<ShaderResourceBatch> batch;
-		if (bind)
-			batch = std::make_shared<ShaderResourceBindBatch>();
-		else
-			batch = std::make_shared<ShaderResourceFetchBatch>();
-		batch->shader_type = bind ? run[0]->dst.shader_type : run[0]->src.shader_type;
-		batch->first_slot = first;
-		batch->count = last - first + 1;
-		batch->seed_with_current = seed;
-
-		for (auto &op : run) {
-			unsigned slot = bind ? op->dst.slot : op->src.slot;
-			if (slot >= first && slot <= last)
-				batch->operations.push_back(op);
-		}
-
-		if (batch->operations.size() < 2) {
-			out.push_back(batch->operations[0]);
-			continue;
-		}
-
-		batch->ini_line = batch->operations[0]->ini_line + L" ... +" + std::to_wstring(batch->operations.size() - 1);
-		out.push_back(batch);
+	if (prefetch_current_bindings) {
+		emit_slot_batch(run, bind, slots.front(), slots.back(), true, out);
+		return;
 	}
+
+	unsigned first = slots[0];
+	for (size_t i = 1; i < slots.size(); i++) {
+		if (slots[i] != slots[i - 1] + 1) {
+			emit_slot_batch(run, bind, first, slots[i - 1], false, out);
+			first = slots[i];
+		}
+	}
+	emit_slot_batch(run, bind, first, slots.back(), false, out);
 }
 
+// Optimiser pass: walks the command list once and replaces every run of two
+// or more adjacent batchable operations with bind / fetch batches. A run is
+// a maximal sequence of consecutive commands that are all batchable binds
+// or all batchable fetches for the same shader stage; any other command
+// (including a batchable one for another stage or direction) ends it. The
+// order of commands is preserved, batches take the place of their first
+// operation.
 void merge_shader_resource_batches(CommandList *command_list)
 {
 	CommandList::Commands out;
 	std::vector<std::shared_ptr<ResourceCopyOperation>> run;
 	bool run_is_bind = false;
 	wchar_t run_stage = L'\0';
-	bool has_range = false;
 
+	// Ends the current run: a lone operation goes through unchanged, two or
+	// more are handed to emit_slot_batches.
 	auto flush = [&]() {
-		if (run.empty())
-			return;
 		if (run.size() == 1)
 			out.push_back(run[0]);
-		else
+		else if (run.size() > 1)
 			emit_slot_batches(run, run_is_bind, out);
 		run.clear();
 	};
@@ -12882,12 +13098,10 @@ void merge_shader_resource_batches(CommandList *command_list)
 		if (!bind && !fetch) {
 			flush();
 			out.push_back(command);
-			if (!has_range && std::dynamic_pointer_cast<SlotRangeCopyOperation>(command))
-				has_range = true;
 			continue;
 		}
 
-		wchar_t stage = bind ? op->dst.shader_type : op->src.shader_type;
+		wchar_t stage = slot_target(op.get(), bind).shader_type;
 		if (!run.empty() && (bind != run_is_bind || stage != run_stage))
 			flush();
 
@@ -12897,13 +13111,11 @@ void merge_shader_resource_batches(CommandList *command_list)
 	}
 	flush();
 
+	// Every batch replaces at least two commands, so a shorter list means
+	// something was merged:
 	if (out.size() != command_list->commands.size()) {
 		LogInfo("Merged %Iu slot operations into batches in [%S]\n", command_list->commands.size() - out.size(), command_list->ini_section.c_str());
 		command_list->commands = std::move(out);
-	} else if (has_range) {
-		// Already expressed as an explicit slot range: nothing to merge,
-		// but log it too so it shows up next to the batched sections:
-		LogInfo("Merged 0 slot operations into batches in [%S] (already using slot ranges)\n", command_list->ini_section.c_str());
 	}
 }
 
@@ -13036,7 +13248,7 @@ static CommandListCommand* parse_slot_range_operation(
 		D3D11_BIND_FLAG bind_flags = dst.BindFlags(NULL, &misc_flags);
 		bool ok = src.type == ResourceCopyTargetType::POOL
 			? src.custom_resource_pool->PropagateFlags(bind_flags, misc_flags)
-			: src.GetCustomResource(nullptr, true)->AddFlags(bind_flags, misc_flags); // true: is_assignment
+			: src.GetCustomResource(nullptr, true)->AddFlags(bind_flags, misc_flags, true);
 		if (!ok) {
 			LogOverlayW(LOG_WARNING, L"Slot range source has incompatible bind flags\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
@@ -13185,8 +13397,6 @@ void SlotRangeCopyOperation::RunBind(CommandListState *state, unsigned first, un
 		ID3D11View *src_view = NULL;
 		CustomResource *source = single_source;
 
-		// GetResource(id, template_lookup, use_ring_index, is_assignment);
-		// pool indices wrap like PoolFoo[-1]:
 		if (src.type == ResourceCopyTargetType::POOL)
 			source = src.custom_resource_pool->GetResource((float)(pool_first + (int)i), false, false, false);
 
@@ -13236,8 +13446,6 @@ void SlotRangeCopyOperation::RunBind(CommandListState *state, unsigned first, un
 		}
 
 		if (source) {
-			// dst is passed so the source is substantiated with this
-			// slot type's bind flags:
 			ResourceCopyTarget element;
 			element.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
 			element.SetCustomResource(source);

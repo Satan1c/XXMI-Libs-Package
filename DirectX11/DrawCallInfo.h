@@ -1,41 +1,6 @@
 #pragma once
 
 #include <d3d11_1.h>
-#include <vector>
-
-struct TextureOverride;
-
-// Per-draw memo of TextureOverride lookups: the result depends only on the
-// resource and this draw's call info, and the same resource is commonly
-// looked up several times per draw (pre and post lists, several sections or
-// slots). Entries hold a reference so the resource address can't be reused
-// mid-draw. Copies start empty; once full, further lookups aren't memoised.
-struct TextureOverrideMemo
-{
-	static const unsigned capacity = 16;
-
-	struct Entry {
-		ID3D11Resource *resource;
-		bool fuzzy_only;
-		std::vector<TextureOverride*> matches;
-	};
-	Entry entries[capacity];
-	unsigned count = 0;
-
-	TextureOverrideMemo() {}
-	TextureOverrideMemo(const TextureOverrideMemo&) {}
-	TextureOverrideMemo& operator=(const TextureOverrideMemo&) { clear(); return *this; }
-	~TextureOverrideMemo() { clear(); }
-
-	void clear()
-	{
-		for (unsigned i = 0; i < count; i++) {
-			entries[i].resource->Release();
-			entries[i].matches.clear();
-		}
-		count = 0;
-	}
-};
 
 // These values can now be exposed through draw_type and their values should
 // not be changed. Any additions should be added to the end of the list.
@@ -64,8 +29,6 @@ struct DrawCallInfo
 	UINT args_offset;
 
 	bool skip, hunting_skip;
-
-	TextureOverrideMemo texture_override_memo;
 
 	DrawCallInfo() :
 		type(DrawCall::Invalid),
