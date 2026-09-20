@@ -3820,18 +3820,6 @@ float CommandListOperand::evaluate(CommandListState *state, HackerDevice *device
 	return 0;
 }
 
-float CommandListIncrement::evaluate(CommandListState *state, HackerDevice *device)
-{
-	float orig = var->fval;
-
-	var->fval = orig + delta;
-
-	if (var->flags & VariableFlags::PERSIST)
-		G->user_config_dirty = true;
-
-	return postfix ? orig : var->fval;
-}
-
 bool CommandListOperand::static_evaluate(float *ret, HackerDevice *device, bool evaluate_variables)
 {
 	switch (type) {
@@ -4764,7 +4752,6 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 	size_t friendly_pos = 0;
 	int i;
 	bool last_was_operand = false;
-	float prefix_delta = 0; // ++$x / --$x: applies to the operand that follows
 
 	LogDebug("    Tokenising \"%S\"\n", expr.c_str());
 
@@ -4783,16 +4770,6 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 		remain = expr.substr(pos);
 
 		bool matched = false;
-
-		// Prefix increment / decrement, only when glued to a variable so
-		// "- -$x" and "$a - -$b" keep working:
-		if (remain.size() > 2 && (remain[0] == L'+' || remain[0] == L'-') && remain[1] == remain[0] && remain[2] == L'$')
-		{
-			prefix_delta = remain[0] == L'+' ? 1.0f : -1.0f;
-			LogDebug("      Prefix %s\n", prefix_delta > 0 ? "++" : "--");
-			pos += 2;
-			continue;
-		}
 
 		// Operators:
 		for (i = 0; i < ARRAYSIZE(operator_tokens); i++)
@@ -4999,29 +4976,7 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 
 import_operand:
 
-		// Postfix increment / decrement glued to the operand ($x++):
-		float postfix_delta = 0;
-		if (pos + 1 < expr.size() && (expr[pos] == L'+' || expr[pos] == L'-') && expr[pos + 1] == expr[pos])
-			postfix_delta = expr[pos] == L'+' ? 1.0f : -1.0f;
-
-		if (prefix_delta != 0 || postfix_delta != 0)
-		{
-			if (operand->type != ParamOverrideType::VARIABLE || (prefix_delta != 0 && postfix_delta != 0))
-				throw CommandListSyntaxError(L"++ and -- can only be applied to a variable", friendly_pos);
-
-			bool postfix = postfix_delta != 0;
-			float delta = postfix ? postfix_delta : prefix_delta;
-			if (postfix)
-				pos += 2;
-			token = postfix ? token + (delta > 0 ? L"++" : L"--") : (delta > 0 ? L"++" : L"--") + token;
-			LogDebug("      Increment: \"%S\"\n", token.c_str());
-			tree->tokens.emplace_back(make_shared<CommandListIncrement>(friendly_pos, token, operand->var, delta, postfix));
-			prefix_delta = 0;
-		}
-		else
-		{
-			tree->tokens.emplace_back(std::move(operand));
-		}
+		tree->tokens.emplace_back(std::move(operand));
 
 		if (last_was_operand)
 		{
@@ -5920,7 +5875,6 @@ bool CommandListOperand::parse_variable(const wstring* operand, const wstring* i
 		parse_command_list_var_name(*operand, ini_namespace, &var)) {
 		type = ParamOverrideType::VARIABLE;
 		var_ftarget = &var->fval;
-		this->var = var;
 		return operand_allowed_in_context(type, scope);
 	}
 	return false;
@@ -9281,9 +9235,9 @@ bool ParseCommandListResourceCopyTargetDirective(
 
 #pragma region CompoundAssignment
 
-// Splits "$x +" / "1" (from "$x += 1") or "++$x" / "$x--" (a line without "=",
-// only seen in raw_line) into target, binary operator and right hand side.
-static bool split_compound_assignment(const wchar_t *key, const wstring *val, const wstring *raw_line,
+// Splits "$x +" / "1" (from "$x += 1") into target, binary operator and
+// right hand side.
+static bool split_compound_assignment(const wchar_t *key, const wstring *val,
 		wstring *target, wstring *op, wstring *rhs)
 {
 	// Longest first so "<<" is not taken as "<":
@@ -9292,35 +9246,17 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val, co
 		L"+", L"-", L"*", L"/", L"%", L"&", L"|", L"^",
 	};
 
-	if (*key) {
-		// The ini reader split "$x += 1" at the "=", leaving the operator
-		// at the end of the key:
-		size_t key_len = wcslen(key);
-		for (const wchar_t *candidate : compound_operators) {
-			size_t len = wcslen(candidate);
-			if (key_len > len && !wcscmp(key + key_len - len, candidate)) {
-				target->assign(key, key_len - len);
-				*op = candidate;
-				*rhs = *val;
-				break;
-			}
+	// The ini reader split "$x += 1" at the "=", leaving the operator at
+	// the end of the key:
+	size_t key_len = wcslen(key);
+	for (const wchar_t *candidate : compound_operators) {
+		size_t len = wcslen(candidate);
+		if (key_len > len && !wcscmp(key + key_len - len, candidate)) {
+			target->assign(key, key_len - len);
+			*op = candidate;
+			*rhs = *val;
+			break;
 		}
-	} else if (raw_line) {
-		wstring line = *raw_line;
-		size_t len = line.size();
-		if (len < 3)
-			return false;
-		wstring head = line.substr(0, 2), tail = line.substr(len - 2);
-		if (head == L"++" || head == L"--") {
-			*target = line.substr(2);
-			*op = head.substr(0, 1);
-		} else if (tail == L"++" || tail == L"--") {
-			*target = line.substr(0, len - 2);
-			*op = tail.substr(0, 1);
-		} else {
-			return false;
-		}
-		*rhs = L"1";
 	}
 
 	if (op->empty() || rhs->empty())
@@ -9331,30 +9267,17 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val, co
 	return !target->empty();
 }
 
-// $x += 1, x0 *= 2, $PoolFoo[$i] |= 4 and every other binary operator, plus
-// ++$x / $x++ / --$x / $x--. The target's own assignment parser builds the
-// command, with the expression "target op (rhs)" assembled by
-// CommandListExpression::parse_compound.
+// $x += 1, x0 *= 2, $PoolFoo[$i] |= 4 and every other binary operator. The
+// target's own assignment parser builds the command, with the expression
+// "target op (rhs)" assembled by CommandListExpression::parse_compound.
 bool ParseCommandListCompoundAssignment(const wchar_t *section,
 		const wchar_t *key, wstring *val, const wstring *raw_line,
 		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
-	wstring target, op, rhs, line;
+	wstring target, op, rhs;
 
-	// "post ++$x" has no "=", so the pre/post prefix is still on the line:
-	if (!*key && raw_line) {
-		line = *raw_line;
-		if (post_command_list && !line.compare(0, 5, L"post ")) {
-			line = line.substr(5);
-			command_list = post_command_list;
-		} else if (post_command_list && !line.compare(0, 4, L"pre ")) {
-			line = line.substr(4);
-		}
-		raw_line = &line;
-	}
-
-	if (!split_compound_assignment(key, val, raw_line, &target, &op, &rhs))
+	if (!split_compound_assignment(key, val, &target, &op, &rhs))
 		return false;
 
 	bool parsed;
