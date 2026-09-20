@@ -1,11 +1,13 @@
 #include "IniHandler.h"
 
 #include <algorithm>
+#include <charconv>
 #include <iterator>
 #include <string>
 #include <strsafe.h>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 #include <memory>
 #include <pcre2.h>
 
@@ -1187,20 +1189,42 @@ inline bool ConvertExpressionToFloat(float expr, float& out) noexcept
 	return true;
 }
 
+// std::from_chars only accepts narrow characters. Numeric literals are pure
+// ASCII, so a value containing anything else is left to the expression parser.
+static bool NarrowNumericLiteral(const wstring& val, std::string& out)
+{
+	out.clear();
+	out.reserve(val.size());
+
+	for (wchar_t c : val)
+	{
+		if (c > 0x7F)
+			return false;
+		out.push_back(static_cast<char>(c));
+	}
+
+	return true;
+}
+
 bool ParseFloatValue(const wchar_t* section, const wchar_t* key, const wstring& val, float& out, bool warn = true, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	out = std::wcstof(val.c_str(), &end); // TODO: C++17: use std::from_chars.
-	
-	if (*end == L'\0')
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
 	{
-		if (errno == ERANGE)
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		auto [ptr, ec] = std::from_chars(first, last, out);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Treat floating-point overflow as ±infinity.
-			out = std::signbit(out) ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+			if (ec == std::errc::result_out_of_range)
+			{
+				// Treat floating-point overflow as ±infinity.
+				out = (narrow[0] == '-') ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToFloat);
@@ -1233,26 +1257,33 @@ inline bool ConvertExpressionToInt(float expr, int& out) noexcept
 
 bool ParseIntValue(const wchar_t* section, const wchar_t* key, const wstring& val, int& out, bool warn = false, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	long long n = std::wcstoll(val.c_str(), &end, 10); // TODO: C++17: use std::from_chars
-	
-	if (*end == L'\0') {
-		if (errno == ERANGE)
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
+	{
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		long long n = 0;
+		auto [ptr, ec] = std::from_chars(first, last, n, 10);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Saturate integer literal overflow.
-			out = (n < 0) ? INT_MIN : INT_MAX;
-		}
-		else
-		{
-			if (n < INT_MIN)
-				out = INT_MIN;
-			else if (n > INT_MAX)
-				out = INT_MAX;
+			if (ec == std::errc::result_out_of_range)
+			{
+				// Saturate integer literal overflow.
+				out = (narrow[0] == '-') ? INT_MIN : INT_MAX;
+			}
 			else
-				out = static_cast<int>(n);
+			{
+				if (n < INT_MIN)
+					out = INT_MIN;
+				else if (n > INT_MAX)
+					out = INT_MAX;
+				else
+					out = static_cast<int>(n);
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToInt);
