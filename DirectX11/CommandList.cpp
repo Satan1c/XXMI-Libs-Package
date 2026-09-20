@@ -12825,22 +12825,40 @@ static bool is_batchable_fetch(const ResourceCopyOperation *op)
 		&& op->dst.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE;
 }
 
-void ConditionalSlotCopyOperation::run(CommandListState *state)
+ConditionalSlotBranch* ConditionalSlotCopyOperation::MatchingBranch(CommandListState *state)
 {
 	for (auto &branch : branches) {
-		if (branch.condition && !branch.condition->evaluate(state))
-			continue;
-		if (!branch.op)
-			return; // no branch taken: leave the current binding
+		if (!branch.condition || branch.condition->evaluate(state))
+			return branch.op ? &branch : NULL; // NULL op: no branch taken
+	}
+	return NULL;
+}
 
-		// Hand our own deferred binding through to whichever branch's
-		// operation matched, and let it run with its own dst/src/options
-		// exactly as if it had run standalone:
-		branch.op->deferred = deferred;
-		branch.op->run(state);
-		branch.op->deferred = NULL;
+void ConditionalSlotCopyOperation::run(CommandListState *state)
+{
+	ConditionalSlotBranch *branch = MatchingBranch(state);
+	if (!branch) {
+		COMMAND_LIST_LOG(state, "%S: no branch taken, keeping the current binding\n", ini_line.c_str());
 		return;
 	}
+
+	// Hand our own deferred binding through to whichever branch's
+	// operation matched, and let it run with its own dst/src/options
+	// exactly as if it had run standalone:
+	branch->op->deferred = deferred;
+	branch->op->run(state);
+	branch->op->deferred = NULL;
+}
+
+// Fetch direction: ShaderResourceFetchBatch already read the slot and hands
+// its contents to whichever branch matched.
+void ConditionalSlotCopyOperation::RunWithSource(CommandListState *state, ID3D11Resource *src_resource, ID3D11View *src_view)
+{
+	ConditionalSlotBranch *branch = MatchingBranch(state);
+	if (branch)
+		branch->op->RunWithSource(state, src_resource, src_view);
+	else
+		COMMAND_LIST_LOG(state, "%S: no branch taken\n", ini_line.c_str());
 }
 
 // Walks a simple if/elif/else chain, checking that every reachable branch
@@ -12849,12 +12867,28 @@ void ConditionalSlotCopyOperation::run(CommandListState *state)
 // (only valid for the final branch, meaning "leave the current binding" -
 // the same thing unless_null already does for a batch). Mixing pre/post
 // within the chain is out of scope and bails out.
+// Whether an expression reads pipeline state (ps-t0, ps-t0->Width, ...).
+// Inside a batch the binds of the run are deferred to its end, so such a
+// condition would see the bindings from before the run rather than the ones
+// the lines above it just made.
+static bool expression_reads_pipeline(CommandListEvaluatable *node)
+{
+	if (auto operand = dynamic_cast<CommandListOperand *>(node))
+		return operand->type == ParamOverrideType::TEXTURE;
+	if (auto op = dynamic_cast<CommandListOperator *>(node))
+		return (op->lhs && expression_reads_pipeline(op->lhs.get()))
+			|| (op->rhs && expression_reads_pipeline(op->rhs.get()));
+	return false;
+}
+
 static bool collect_conditional_slot_chain(IfCommand *if_cmd, bool bind, wchar_t stage, unsigned slot,
 	std::vector<ConditionalSlotBranch> &out)
 {
 	if (!if_cmd->true_commands_post->commands.empty() || !if_cmd->false_commands_post->commands.empty())
 		return false;
 	if (if_cmd->true_commands_pre->commands.size() != 1)
+		return false;
+	if (expression_reads_pipeline(if_cmd->expression.evaluatable.get()))
 		return false;
 
 	auto true_op = std::dynamic_pointer_cast<ResourceCopyOperation>(if_cmd->true_commands_pre->commands[0]);
@@ -12915,6 +12949,16 @@ static std::shared_ptr<ResourceCopyOperation> try_fold_conditional_slot_op(std::
 		return nullptr;
 
 	merged->bind = bind;
+
+	// A bind batch writes every slot in its range, so a slot this operation
+	// leaves alone (no branch taken, or an unless_null branch with a null
+	// source) has to be seeded with its current binding, same as a plain
+	// unless_null line asks for:
+	for (auto &branch : merged->branches) {
+		if (!branch.op || (branch.op->options & ResourceCopyOptions::UNLESS_NULL))
+			merged->options |= ResourceCopyOptions::UNLESS_NULL;
+	}
+
 	// Only the handful of scalar fields the optimiser's grouping logic
 	// reads: ResourceCopyTarget isn't copyable (it owns unique_ptr
 	// expressions), and merged->dst/src are never used for the real copy -
@@ -12938,6 +12982,16 @@ static const ResourceCopyTarget& slot_target(const ResourceCopyOperation *op, bo
 	return bind ? op->dst : op->src;
 }
 
+// An operation that ends up outside any batch goes back into the list as it
+// was: for a folded if/elif/else chain that is the original IfCommand, so it
+// runs and logs exactly as before.
+static std::shared_ptr<CommandListCommand> unbatched(const std::shared_ptr<ResourceCopyOperation> &op)
+{
+	if (auto folded = std::dynamic_pointer_cast<ConditionalSlotCopyOperation>(op))
+		return folded->owning_if;
+	return op;
+}
+
 // Wraps the operations of a run that fall within [first, last] into a single
 // bind / fetch batch and appends it to out. A range holding a single
 // operation is not worth a batch, that operation is appended as is.
@@ -12959,7 +13013,7 @@ static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperat
 	}
 
 	if (batch->operations.size() < 2) {
-		out.push_back(batch->operations[0]);
+		out.push_back(unbatched(batch->operations[0]));
 		return;
 	}
 
@@ -13032,7 +13086,7 @@ void merge_shader_resource_batches(CommandList *command_list)
 	// more are handed to emit_slot_batches.
 	auto flush = [&]() {
 		if (run.size() == 1)
-			out.push_back(run[0]);
+			out.push_back(unbatched(run[0]));
 		else if (run.size() > 1)
 			emit_slot_batches(run, run_is_bind, out);
 		run.clear();
@@ -13340,12 +13394,10 @@ void SlotRangeCopyOperation::RunBind(CommandListState *state, unsigned first, un
 	bool use_slot_ops = UsesSlotOps();
 	const char *copy_type = (options & ResourceCopyOptions::COPY_MASK) ? "copy" : "ref";
 
-	if (options & ResourceCopyOptions::UNLESS_NULL) {
+	// Slots kept by unless_null are rebound exactly as fetched, including a
+	// cb region the game bound with XXSetConstantBuffers1:
+	if (options & ResourceCopyOptions::UNLESS_NULL)
 		GetSlotRange(state, dst, first, count, views, buffers, cb_offsets, cb_sizes);
-		// Kept cb slots are rebound whole, like a plain ref would bind them:
-		std::fill_n(cb_offsets, count, 0u);
-		std::fill_n(cb_sizes, count, 0u);
-	}
 
 	// A single custom resource (ResourceFoo or PoolFoo[$i]) goes to every slot:
 	CustomResource *single_source = NULL;
