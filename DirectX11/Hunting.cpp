@@ -1372,7 +1372,7 @@ static void HuntNext(const char *type, std::set<ItemType> *visited,
 				it = visited->begin();
 				*selectedPos = 0;
 			} else {
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {
@@ -1501,7 +1501,7 @@ static void HuntPrev(const char *type, std::set<ItemType> *visited,
 				*selectedPos = size - 1;
 			} else {
 				--it;
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {
