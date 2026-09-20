@@ -25,6 +25,8 @@
 #include "FrameAnalysis.h"
 #include "profiling.h"
 
+#include <bit>
+
 // -----------------------------------------------------------------------------------------------
 
 HackerContext* HackerContextFactory(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1)
@@ -765,29 +767,12 @@ void HackerContext::DeferredShaderReplacementBeforeDispatch()
 		(mCurrentComputeShaderHandle, mCurrentComputeShader, L"cs");
 }
 
-static UINT NextPow2(UINT v)
-{
-	// TODO: C++20
-	// return v <= 1 ? 1 : std::bit_ceil(v);
-	if (v <= 1)
-		return 1;
-
-	--v;
-	v |= v >> 1;
-	v |= v >> 2;
-	v |= v >> 4;
-	v |= v >> 8;
-	v |= v >> 16;
-
-	return ++v;
-}
-
 ID3D11Buffer* HackerContext::GetReadbackBuffer(UINT size)
 {
 	// Round the requested size up to the next power of two so buffers
 	// can be reused across similarly sized requests instead of creating
 	// a unique staging buffer for every size.
-	UINT bucket = NextPow2(size);
+	UINT bucket = std::bit_ceil(size);
 
 	// Reuse an existing staging buffer for this size bucket if available.
 	ID3D11Buffer** existing = mReadbackBuffers.find_ptr(bucket);

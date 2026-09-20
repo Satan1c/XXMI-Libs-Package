@@ -6,6 +6,7 @@
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <sstream>
 #include "HackerDevice.h"
@@ -7210,7 +7211,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 		//	 ResourcePoolFoo[33] -> ResourcePoolFoo_0 (pool_index 0, evicts UID 11)
 		//   ResourcePoolFoo[22] -> ResourcePoolFoo_1 (pool_index 1, existing assignment)
 		//   ResourcePoolFoo[44] -> ResourcePoolFoo_1 (pool_index 1, evicts UID 22)
-		uint32_t key = BitCastToUint(id);
+		uint32_t key = std::bit_cast<uint32_t>(id);
 
 		if (index_map->find(key, pool_index))
 		{
@@ -7245,7 +7246,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 		// The input ID is a spatial hash (uint32_t) bitcast to float.
 		// The hash encodes quantized XYZ cell coordinates and preserves spatial locality.
 		// Objects mapped to the same spatial cell share the same pool slot.
-		uint32_t spatial_hash = BitCastToUint(id);
+		uint32_t spatial_hash = std::bit_cast<uint32_t>(id);
 
 		if (index_map->find(spatial_hash, pool_index))
 		{
@@ -10737,7 +10738,7 @@ float ResourceCopyTarget::GetResourceSpatialHash(CommandListState* state)
 			uint32_t spatial_hash = GetSpatialHash(state->mHackerContext, buf, offset_x, offset_y, offset_z, cell_size, GetCustomResource(state));
 
 			if (spatial_hash)
-				ret = BitCastToFloat(spatial_hash);
+				ret = std::bit_cast<float>(spatial_hash);
 
 			//LogOverlay(LOG_INFO, "GetResourceSpatialHash hash=%08lx x=%.3f y=%.3f z=%.3f\n", spatial_hash, member_args[0].GetValue(), member_args[1].GetValue(), member_args[2].GetValue());
 		}
