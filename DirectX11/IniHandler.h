@@ -1,5 +1,7 @@
 #include "HackerDevice.h"
 
+#include <string_view>
+
 void FlagConfigReload(HackerDevice *device, void *private_data);
 void ToggleInput(HackerDevice *device, void *private_data);
 void LoadConfigFile();
@@ -74,7 +76,7 @@ template <class T1, class T2>
 T2 GetIniEnumClass(const wchar_t *section, const wchar_t *key, T2 def, bool *found,
 		struct EnumName_t<T1, T2> *enum_names);
 
-bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size_t& length);
+bool ParseBinaryLiterals(std::wstring_view input, size_t start, uint64_t& out, size_t& length);
 
 inline wchar_t ascii_tolower(wchar_t c);
 bool get_namespaced_section_name_lower(const wstring *section, const wstring *ini_namespace, wstring *ret);
