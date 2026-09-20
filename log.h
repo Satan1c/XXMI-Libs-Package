@@ -60,6 +60,23 @@ extern bool gLogDebug;
 #define LogDebugNoNL LogDebug
 #define LogDebugWNoNL LogDebugW
 
+// Overlay notification levels. Declared here rather than in Overlay.h so
+// that templates in util.h can refer to them: with two-phase lookup
+// (/permissive-) non-dependent names must be declared before the template.
+enum LogLevel {
+	LOG_DIRE,
+	LOG_WARNING,
+	LOG_WARNING_MONOSPACE,
+	LOG_NOTICE,
+	LOG_INFO,
+
+	NUM_LOG_LEVELS
+};
+
+// Implemented in DirectX11/Overlay.cpp
+void LogOverlayW(LogLevel level, const wchar_t *fmt, ...);
+void LogOverlay(LogLevel level, const char *fmt, ...);
+
 static string LogTime()
 {
 	string timeStr;
