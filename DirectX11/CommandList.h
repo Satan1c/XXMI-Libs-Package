@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <array>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <forward_list>
@@ -1583,7 +1584,7 @@ public:
 		scissor(0)
 	{}
 
-	bool parse_float(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
+	bool parse_float(std::wstring_view operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
 	bool parse_ini_param(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_variable(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_slot(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);

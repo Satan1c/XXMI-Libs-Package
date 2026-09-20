@@ -1043,7 +1043,7 @@ inline std::wstring NormalizeString(const std::wstring& value)
 	return normalized;
 }
 
-bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size_t& length)
+bool ParseBinaryLiterals(std::wstring_view input, size_t start, uint64_t& out, size_t& length)
 {
 	uint64_t value = 0;
 	length = 0;
