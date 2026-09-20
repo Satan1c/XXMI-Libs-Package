@@ -1715,7 +1715,7 @@ void StoreCommand::run(CommandListState* state)
 
 	const bool is_structured = (src_desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) != 0;
 
-	const UINT value_index = offset_expression->evaluate(state);
+	const UINT value_index = (UINT)offset_expression->evaluate(state);
 	const UINT value_size = sizeof(float);
 
 	// StoreCommand historically treats the source as a flat sequence of 4-byte values.
@@ -1789,7 +1789,7 @@ void StoreCommand::run(CommandListState* state)
 	//
 	// Its size is the complete copy region, which may contain multiple
 	// structures when the requested value crosses a structure boundary.
-	ID3D11Buffer* staging = mHackerContext->GetReadbackBuffer(copy_size);
+	ID3D11Buffer* staging = mHackerContext->GetReadbackBuffer(static_cast<UINT>(copy_size));
 
 	if (!staging)
 	{
@@ -3001,7 +3001,7 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 			return texture_filter_target.GetResourceMips(state);
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS:
-			return texture_filter_target.GetResourceBindFlags(state);
+			return (float)texture_filter_target.GetResourceBindFlags(state);
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SIZE:
 			return texture_filter_target.GetResourceSize(state);
@@ -5075,7 +5075,7 @@ public: \
 		) : CommandListOperator(lhs, t, rhs) \
 	{} \
 	static const wchar_t* pattern() { return L##operator_pattern; } \
-	float evaluate(float lhs, float rhs) override { return (fn); } \
+	float evaluate(float lhs, float rhs) override { return (float)(fn); } \
 }; \
 static CommandListOperatorFactory<name##T> name;
 
@@ -6413,7 +6413,8 @@ out_close:
 
 bool CustomResource::HasPNGsRGBChunk(wstring filename)
 {
-	FILE *f = _wfopen(filename.c_str(), L"rb");
+	FILE *f = nullptr;
+	_wfopen_s(&f, filename.c_str(), L"rb");
 	if (f != nullptr) {
 		unsigned char signature[8];
 		fread(signature, 1, 8, f);
@@ -7419,6 +7420,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 
 	default:
 		assert(false);
+		return SIZE_MAX;
 	}
 }
 
@@ -7604,7 +7606,7 @@ void CustomResourcePool::InitializeResource(size_t pool_index)
 
 		element.resource->name = resource_id;
 		element.resource->pool = this;
-		element.resource->pool_index = pool_index;
+		element.resource->pool_index = (int)pool_index;
 	}
 
 	element.resource->CopyMetadataFrom(*resource_template);
@@ -8341,7 +8343,7 @@ IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& targ
 		ResourceCopyTargetType type;
 		bool source_only;
 		bool parse_shader = false;
-		int max_slot_count = 0;
+		unsigned max_slot_count = 0;
 	};
 
 	static constexpr TargetInfo targets[] = {
@@ -8823,7 +8825,7 @@ void LayoutElementOperation::run(CommandListState* state)
 {
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
-	override.match.semantic_index = dst.member_args[1].GetValue(state);
+	override.match.semantic_index = (UINT)dst.member_args[1].GetValue(state);
 
 	if (state->input_layout_overrides.empty())
 		state->input_layout_overrides.reserve(16);
