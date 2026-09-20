@@ -4,7 +4,6 @@ name: Build Branches
 on:
   push:
     branches:
-      - master
       - dev
   workflow_dispatch:
 
@@ -17,16 +16,10 @@ jobs:
   build:
     runs-on: windows-2022
 
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [master, dev]
-
     steps:
-    - name: Checkout ${{ matrix.ref }}
+    - name: Checkout ${{ github.ref_name }}
       uses: actions/checkout@v4
       with:
-        ref: ${{ matrix.ref }}
         fetch-depth: 0
 
     # generate-version.ps1 derives the DLL version from the nearest v* tag.
@@ -46,6 +39,6 @@ jobs:
     - name: Upload DLLs
       uses: actions/upload-artifact@v4
       with:
-        name: XXMI-PACKAGE-${{ matrix.ref }}
+        name: XXMI-PACKAGE-${{ github.ref_name }}
         path: x64/Zip Release/*.dll
         if-no-files-found: error
