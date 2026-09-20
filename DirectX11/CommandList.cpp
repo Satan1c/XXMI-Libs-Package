@@ -7,9 +7,11 @@
 #include <DDSTextureLoader.h>
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cstdio>
 #include <sstream>
 #include <string_view>
+#include <system_error>
 #include "HackerDevice.h"
 #include "HackerContext.h"
 #include "Override.h"
@@ -4120,8 +4122,31 @@ static size_t FindResourceCopyTargetTokenEnd(std::wstring_view str, size_t start
 	return end;
 }
 
-// `input` must view a null-terminated buffer (a wstring or a suffix of one):
-// wcstof reads up to the terminator, not up to input.size().
+// Parses a float literal at the start of `input` and reports the number of
+// characters consumed in `length`. Trailing text is not an error: callers
+// that need the whole input consumed compare `length` to input.size().
+//
+// Uses std::from_chars instead of wcstof so parsing is locale-independent
+// (wcstof honours LC_NUMERIC, so a game calling setlocale() on a
+// decimal-comma system would read "0.5" as 0) and bounded by the view
+// rather than by a null terminator.
+//
+// Accepted forms, in the order they are tried:
+//   binary   0b1010                   ParseBinaryLiterals, no sign
+//   hex      0x1A, 0x1.8p3, -0x10     from_chars(chars_format::hex)
+//   decimal  1, 1.5, .5, 1e-3,        from_chars(chars_format::general)
+//            inf, infinity, nan, nan(ind), with optional leading sign
+// Not accepted: leading whitespace (callers strip it), "+-5".
+//
+// Behaviour kept from the wcstof implementation:
+//   - a leading '+' is accepted (from_chars alone rejects it);
+//   - "0x" not followed by hex digits parses as 0 with length 1;
+//   - out-of-range values become ±infinity. This includes underflow
+//     (e.g. 1e-50 -> +inf) because wcstof reported both as ERANGE.
+//
+// To change what is accepted, adjust the `literal_char` set (which only
+// bounds the candidate) and the from_chars calls (which decide the actual
+// end of the literal).
 inline bool ParseFloatToken(std::wstring_view input, float& out, size_t& length)
 {
 	// Binary literal.
@@ -4136,23 +4161,53 @@ inline bool ParseFloatToken(std::wstring_view input, float& out, size_t& length)
 		return true;
 	}
 
-	wchar_t* end = nullptr;
-
-	errno = 0;
-	out = std::wcstof(input.data(), &end);
-
-	if (end == input.data())
-		return false;
-
-	length = static_cast<std::size_t>(end - input.data());
-
-	if (errno == ERANGE)
+	// from_chars only takes narrow characters. Copy the longest prefix made
+	// of characters that can appear in a float literal; anything else (or
+	// any non-ASCII character) ends the candidate.
+	std::string narrow;
+	for (wchar_t c : input)
 	{
-		out = std::signbit(out)
-			? -std::numeric_limits<float>::infinity()
-			: std::numeric_limits<float>::infinity();
+		bool literal_char = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z')
+			|| c == L'.' || c == L'+' || c == L'-' || c == L'(' || c == L')' || c == L'_';
+		if (!literal_char)
+			break;
+		narrow.push_back(static_cast<char>(c));
 	}
 
+	const char* first = narrow.data();
+	const char* last = first + narrow.size();
+
+	// Skip an explicit '+' unless it is followed by another sign, which
+	// wcstof also rejected.
+	if (last - first >= 2 && first[0] == '+' && first[1] != '+' && first[1] != '-')
+		++first;
+
+	bool negative = first != last && *first == '-';
+	const char* digits = negative ? first + 1 : first;
+
+	std::from_chars_result result{ first, std::errc::invalid_argument };
+
+	// Hex: from_chars parses hex only without the "0x" prefix and without a
+	// sign, so both are handled here. If no hex digits follow the prefix
+	// this falls through to the decimal parse, which consumes the "0".
+	if (last - digits >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+	{
+		result = std::from_chars(digits + 2, last, out, std::chars_format::hex);
+		if (result.ec == std::errc() && negative)
+			out = -out;
+	}
+
+	if (result.ec == std::errc::invalid_argument)
+		result = std::from_chars(first, last, out);
+
+	if (result.ec == std::errc::invalid_argument)
+		return false;
+
+	if (result.ec == std::errc::result_out_of_range)
+		out = negative ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+
+	// `narrow` is a prefix copy of `input`, so offsets map 1:1.
+	length = static_cast<size_t>(result.ptr - narrow.data());
 	return true;
 }
 
@@ -4724,8 +4779,6 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 
 		friendly_pos = pos;
 
-		// Suffix view of `expr`, so remain.data() stays null-terminated
-		// for the wcstof-based float parsing below.
 		remain = std::wstring_view(expr).substr(pos);
 
 		bool matched = false;
