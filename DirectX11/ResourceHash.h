@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <bit>
 
 #include "util.h"
 #include "DrawCallInfo.h"
@@ -44,27 +45,13 @@ public:
 		uint32_t generation = 0;
 	};
 
-	static size_t NextPow2(size_t v)
-	{
-		if (v <= 1) return 1;
-		v--;
-		v |= v >> 1;
-		v |= v >> 2;
-		v |= v >> 4;
-		v |= v >> 8;
-		v |= v >> 16;
-		if constexpr (sizeof(size_t) == 8)
-			v |= v >> 32;
-		v++;
-		return v;
-	}
-
 	// Constructs the hash map with an initial capacity.
 	// - Capacity should ideally be a power of two for optimal performance
 	// - Larger initial capacity reduces need for rehashing
 	FlatHashMap(size_t initial_capacity = 1024)
 	{
-		initial_capacity = NextPow2(initial_capacity);
+		// Round up to the next power of two so `mask` works as a modulo.
+		initial_capacity = std::bit_ceil(initial_capacity);
 		table.resize(initial_capacity);
 		mask = initial_capacity - 1;
 		count = 0;
@@ -296,7 +283,8 @@ private:
 		// Allocate new table
 		std::vector<Entry> old = std::move(table);
 
-		new_capacity = NextPow2(new_capacity);
+		// Round up to the next power of two so `mask` works as a modulo.
+		new_capacity = std::bit_ceil(new_capacity);
 
 		table.clear();
 		table.resize(new_capacity);
@@ -618,8 +606,6 @@ UINT GetIndexBufferRegionOffset(DXGI_FORMAT format, DrawCallInfo* call_info, UIN
 UINT GetIndexBufferRegionSize(DXGI_FORMAT format, DrawCallInfo* call_info);
 UINT GetVertexBufferRegionSize(UINT stride, DrawCallInfo* call_info);
 
-float BitCastToFloat(uint32_t bits);
-uint32_t BitCastToUint(float bits);
 uint64_t HashPointer(const void* p);
 uint32_t HashUnsigned32(uint32_t u);
 float EncodeFloat30(const uint32_t hash);
