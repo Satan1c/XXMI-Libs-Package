@@ -8307,10 +8307,11 @@ IniParserResult ResourceCopyTarget::ParseTargetPool(const wchar_t*& target, size
 	// Handle resource pool index
 	if (custom_resource_pool->index_type == PoolIndexType::STATIC)
 	{
-		// Parse value for STATIC index type.
-		wchar_t* end;
-		float static_pool_index = wcstof(pool_index_text.c_str(), &end);
-		if (*end != L'\0')
+		// Parse value for STATIC index type. The whole text must be a
+		// single float literal (same grammar as the expression parser).
+		float static_pool_index;
+		size_t len;
+		if (!ParseFloatToken(pool_index_text, static_pool_index, len) || len != pool_index_text.size())
 			return IniParserResult::SYNTAX_ERROR;
 
 		// Statically resolve custom resource or variable from pool.
@@ -8950,11 +8951,12 @@ static CommandListCommand* parse_layout_operation(
 	{
 		//LogInfo("Parsed LAYOUT_ELEMENT_OFFSET: ");
 
-		wchar_t* end = nullptr;
-		operation->override.replace.aligned_byte_offset = (UINT)wcstof(val->c_str(), &end);
-
-		if (*end != L'\0')
+		float offset;
+		size_t len;
+		if (!ParseFloatToken(*val, offset, len) || len != val->size())
 			goto bail;
+
+		operation->override.replace.aligned_byte_offset = (UINT)offset;
 
 		break;
 	}
