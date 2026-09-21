@@ -4188,8 +4188,10 @@ static size_t FindResourceCopyTargetTokenEnd(std::wstring_view str, size_t start
 // Behaviour kept from the wcstof implementation:
 //   - a leading '+' is accepted (from_chars alone rejects it);
 //   - "0x" not followed by hex digits parses as 0 with length 1;
-//   - out-of-range values become ±infinity. This includes underflow
-//     (e.g. 1e-50 -> +inf) because wcstof reported both as ERANGE.
+//   - overflow becomes ±infinity.
+// Changed: underflow (1e-50) becomes ±0. The wcstof version turned it into
+// ±infinity as well because it only checked for ERANGE; from_chars also
+// lumps both together, so FloatLiteralUnderflows tells them apart.
 //
 // To change what is accepted, adjust the `literal_char` set (which only
 // bounds the candidate) and the from_chars calls (which decide the actual
@@ -4233,25 +4235,37 @@ inline bool ParseFloatToken(std::wstring_view input, float& out, size_t& length)
 	const char* digits = negative ? first + 1 : first;
 
 	std::from_chars_result result{ first, std::errc::invalid_argument };
+	const char* literal = first;
+	std::chars_format format = std::chars_format::general;
 
 	// Hex: from_chars parses hex only without the "0x" prefix and without a
 	// sign, so both are handled here. If no hex digits follow the prefix
 	// this falls through to the decimal parse, which consumes the "0".
 	if (last - digits >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
 	{
-		result = std::from_chars(digits + 2, last, out, std::chars_format::hex);
+		literal = digits + 2;
+		format = std::chars_format::hex;
+		result = std::from_chars(literal, last, out, format);
 		if (result.ec == std::errc() && negative)
 			out = -out;
 	}
 
 	if (result.ec == std::errc::invalid_argument)
-		result = std::from_chars(first, last, out);
+	{
+		literal = first;
+		format = std::chars_format::general;
+		result = std::from_chars(literal, last, out, format);
+	}
 
 	if (result.ec == std::errc::invalid_argument)
 		return false;
 
 	if (result.ec == std::errc::result_out_of_range)
-		out = negative ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+	{
+		// from_chars left `out` untouched: overflow -> ±inf, underflow -> ±0.
+		float magnitude = FloatLiteralUnderflows(literal, result.ptr, format) ? 0.0f : std::numeric_limits<float>::infinity();
+		out = negative ? -magnitude : magnitude;
+	}
 
 	// `narrow` is a prefix copy of `input`, so offsets map 1:1.
 	length = static_cast<size_t>(result.ptr - narrow.data());

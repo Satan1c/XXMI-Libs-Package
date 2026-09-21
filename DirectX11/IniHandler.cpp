@@ -1074,6 +1074,40 @@ bool ParseBinaryLiterals(std::wstring_view input, size_t start, uint64_t& out, s
 	return true;
 }
 
+// std::from_chars reports overflow and underflow alike as
+// errc::result_out_of_range and leaves the output untouched, but callers
+// want ±inf for overflow and ±0 for underflow (what strtof produces).
+// Tells the two apart for the literal in [first, last) that a float
+// from_chars call with the same `format` already accepted up to `last`.
+//
+// A double parse settles anything between float and double range
+// (1e-50, 1e300). If even that is out of range the text decides: a
+// negative exponent (1e-999) or, without an exponent, an all-zero integer
+// part (0.000...0001) means the value is tiny; anything else is huge.
+bool FloatLiteralUnderflows(const char* first, const char* last, std::chars_format format)
+{
+	double wide;
+	std::from_chars_result result = std::from_chars(first, last, wide, format);
+	if (result.ec == std::errc())
+		return std::fabs(wide) < 1.0;
+
+	// Hex literals use 'p' for the exponent ('e' is a digit there).
+	const bool hex = format == std::chars_format::hex;
+	for (const char* p = first; p != last; ++p)
+	{
+		const bool exponent = hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E');
+		if (exponent)
+			return p + 1 != last && p[1] == '-';
+	}
+
+	for (const char* p = first; p != last && *p != '.'; ++p)
+	{
+		if (*p != '0' && *p != '+' && *p != '-')
+			return false;
+	}
+	return true;
+}
+
 template<typename T, typename Converter>
 bool ParseIniExpression(
 	const wstring* ini_namespace_override,
@@ -1220,8 +1254,9 @@ bool ParseFloatValue(const wchar_t* section, const wchar_t* key, const wstring& 
 		{
 			if (ec == std::errc::result_out_of_range)
 			{
-				// Treat floating-point overflow as ±infinity.
-				out = (narrow[0] == '-') ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+				// from_chars left `out` untouched: overflow -> ±inf, underflow -> ±0.
+				float magnitude = FloatLiteralUnderflows(first, ptr, std::chars_format::general) ? 0.0f : std::numeric_limits<float>::infinity();
+				out = (narrow[0] == '-') ? -magnitude : magnitude;
 			}
 			return true;
 		}
