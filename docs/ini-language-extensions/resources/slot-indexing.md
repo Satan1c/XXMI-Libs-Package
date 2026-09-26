@@ -66,6 +66,8 @@ Slot bounds are validated at runtime: `$first` must not be negative, `$last` mus
 
 Pool bounds follow [Ring indexing](../pools/indexing.md/#ring-indexing) rules, so negative and overflowing indices wrap around the pool size. The range may not be larger than the pool.
 
+This holds for every index type: on a `fifo` or `spatial` pool the bounds are still element indices, not keys, so the range addresses the physical elements directly and bypasses key lookup. Element keys are not touched by a range operation. A fetch counts as an update of the elements it writes for [expiration](../pools/declaration.md/#element-expiration) purposes, like any assignment.
+
 A pool range is only valid on the other side of a slot range.
 
 ### Inheriting Bounds
@@ -89,7 +91,7 @@ When bounds are given on both sides, both ranges must have the same size.
 
 Slot ranges accept the same copy types and options as a single-slot copy, such as `copy`, `unless_null`, `no_view_cache`, `raw` or `resolve_msaa`.
 
-* `unless_null` — slots whose source is `null` keep their current binding, and pool elements whose source slot is empty are left untouched.
+* `unless_null` — slots whose source is `null` keep their current binding, and pool elements whose source slot is empty are left untouched, including their [expiration](../pools/declaration.md/#element-expiration): a skipped element does not count as updated.
 * `no_view_cache` — views created for the range are released after each run instead of being cached per slot.
 
 A plain `ref` (optionally with `unless_null` and `no_view_cache`) is the fast path: the range only resolves views and issues one bind or fetch call. When a pool element already holds a view of the slot's type, for example because it was fetched from a slot of the same type, that view is bound directly instead of creating a new one.
@@ -119,3 +121,8 @@ CheckTextureOverride = ps-t[0:9]  ; Same as CheckTextureOverride = ps-t0 ... ps-
 ```
 
 Pool ranges and the bare `<stage>-t` form are not supported by `CheckTextureOverride`. Other commands do not accept ranges.
+
+## Examples
+
+* [Slot Range Capture](../examples/slot-range-capture.md) — save, rebind and restore a range of slots through a pool
+* [Slot Scan](../examples/slot-scan.md) — loop over slots with a dynamic slot index
