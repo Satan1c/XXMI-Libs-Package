@@ -364,6 +364,22 @@ MigotoIncludeHandler::MigotoIncludeHandler(const char *path)
 	push_dir(path);
 }
 
+ShaderCompileMacros::ShaderCompileMacros(const D3D_SHADER_MACRO *extra)
+{
+	for (; extra && extra->Name; extra++)
+		macros.push_back(*extra);
+
+	// ini_params=-1 turns IniParams off altogether, and then there is no
+	// register to point a shader at. Leaving the definition out makes such a
+	// shader fail to compile instead of binding something unrelated:
+	if (G->IniParamsReg >= 0) {
+		sprintf_s(ini_params_register, sizeof(ini_params_register), "t%i", G->IniParamsReg);
+		macros.push_back({ "INI_PARAMS_REGISTER", ini_params_register });
+	}
+
+	macros.push_back({ NULL, NULL });
+}
+
 // This tracks any directories mentioned when including files, so that files in
 // those directories can include other files relative to themselves rather than
 // having to specify the include path relative to the initial source file.
@@ -545,8 +561,6 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 		LogInfo("    Reload source code loaded. Size = %d\n", srcDataSize);
 		LogInfo("    compiling replacement HLSL code with shader model %s\n", shaderModel);
 
-		// TODO: Add #defines for IniParams
-
 		ID3DBlob* pErrorMsgs = nullptr;
 		// Pass the real filename and use the standard include handler so that
 		// #include will work with a relative path from the shader itself.
@@ -554,7 +568,8 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 		// that we can make reloading work better when using includes:
 		wcstombs(apath, fullName, MAX_PATH);
 		MigotoIncludeHandler include_handler(apath);
-		HRESULT ret = D3DCompile(srcData.data(), srcDataSize, apath, 0,
+		ShaderCompileMacros macros;
+		HRESULT ret = D3DCompile(srcData.data(), srcDataSize, apath, macros.Get(),
 				G->recursive_include == -1 ? D3D_COMPILE_STANDARD_FILE_INCLUDE : &include_handler,
 			"main", shaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pByteCode, &pErrorMsgs);
 

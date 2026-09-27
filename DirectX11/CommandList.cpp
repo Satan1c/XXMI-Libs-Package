@@ -2440,9 +2440,7 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 	}
 	CloseHandle(f);
 
-	// TODO: Add #defines for IniParams. Define a macro
-	// for the type of shader, and maybe allow more defines to be specified
-	// in the ini
+	// TODO: Allow more defines to be specified in the ini
 
 	// Pass the real filename and use the standard include handler so that
 	// #include will work with a relative path from the shader itself.
@@ -2451,7 +2449,8 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 	wcstombs(apath, wpath, MAX_PATH);
 	{
 		MigotoIncludeHandler include_handler(apath);
-		hr = D3DCompile(srcData.data(), srcDataSize, apath, macros,
+		ShaderCompileMacros compile_macros(macros);
+		hr = D3DCompile(srcData.data(), srcDataSize, apath, compile_macros.Get(),
 			G->recursive_include == -1 ? D3D_COMPILE_STANDARD_FILE_INCLUDE : &include_handler,
 			"main", shaderModel, (UINT)compile_flags, 0, ppBytecode, &pErrorMsgs);
 	}
