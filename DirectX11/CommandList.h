@@ -1076,7 +1076,8 @@ public:
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
 private:
-	bool _ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom);
+	bool AcceptParsedTarget(IniParserResult ret, bool allow_range) const;
+	bool ParseRangeBounds(const wstring& text, size_t colon, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPrefix(const wchar_t*& target, size_t& length);
 	IniParserResult ParseTargetMember(const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source, const wstring* ini_namespace, CommandListScope* scope);
@@ -1249,6 +1250,8 @@ private:
 void merge_shader_resource_batches(CommandList *command_list);
 
 // "<stage>-t[$a:$b] = ref PoolFoo[$c:$d]" / "= ref ResourceFoo" / "= null" and
+struct SlotRangeBindings;
+
 // "PoolFoo[$c:$d] = ref <stage>-t[$a:$b]" for t, u and cb slots. Bounds are
 // evaluated per run and the whole range goes through one XXGet/Set call.
 class SlotRangeCopyOperation : public CommandListCommand {
@@ -1274,6 +1277,12 @@ private:
 	ResourceCopyOperation* SlotOp(unsigned index, unsigned slot);
 	void RunBind(CommandListState *state, unsigned first, unsigned count, int pool_first);
 	void RunFetch(CommandListState *state, unsigned first, unsigned count, int pool_first);
+	// One slot of the range each, index into the bindings and slot on the
+	// pipeline. The fetch pair borrows the slot's resource from the caller:
+	void BindSlotOp(CommandListState *state, SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *source);
+	void BindSlotRef(CommandListState *state, SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *source);
+	void FetchSlotOp(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
+	void FetchSlotRef(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
 	ID3D11View* ViewForSlot(CommandListState *state, unsigned index, ID3D11Resource *resource, ID3D11View *src_view);
 };
 
