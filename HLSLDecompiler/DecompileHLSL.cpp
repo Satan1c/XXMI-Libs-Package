@@ -6735,8 +6735,15 @@ public:
 			"#define cmp -\n";
 
 		if (G->IniParamsReg >= 0) {
+			// Bind through the define so that moving ini_params does not
+			// invalidate a dumped shader. The fallback keeps the dump valid
+			// HLSL on its own, for fxc and cmd_Decompiler, which do not
+			// define it:
 			declaration +=
-				"Texture1D<float4> IniParams : register(t" + std::to_string(G->IniParamsReg) + ");\n";
+				"#ifndef INI_PARAMS_REGISTER\n"
+				"#define INI_PARAMS_REGISTER t" + std::to_string(G->IniParamsReg) + "\n"
+				"#endif\n"
+				"Texture1D<float4> IniParams : register(INI_PARAMS_REGISTER);\n";
 		}
 
 		if (G->StereoParamsReg >= 0) {
