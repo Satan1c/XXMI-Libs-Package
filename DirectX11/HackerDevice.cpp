@@ -769,8 +769,6 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// Compile replacement.
 			LogInfo("    compiling replacement HLSL code with shader model %s\n", tmpShaderModel);
 
-			// TODO: Add #defines for StereoParams and IniParams
-
 			ID3DBlob *errorMsgs; // FIXME: This can leak
 			ID3DBlob *compiledOutput = 0;
 			// Pass the real filename and use the standard include handler so that
@@ -779,7 +777,8 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// that we can make reloading work better when using includes:
 			wcstombs(apath, path, MAX_PATH);
 			MigotoIncludeHandler include_handler(apath);
-			HRESULT ret = D3DCompile(srcData, srcDataSize, apath, 0,
+			ShaderCompileMacros macros;
+			HRESULT ret = D3DCompile(srcData, srcDataSize, apath, macros.Get(),
 				G->recursive_include == -1 ? D3D_COMPILE_STANDARD_FILE_INCLUDE : &include_handler,
 				"main", tmpShaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &compiledOutput, &errorMsgs);
 			delete[] srcData; srcData = 0;
@@ -1047,8 +1046,6 @@ static bool DecompileAndPossiblyPatchShader(__in UINT64 hash,
 
 	LogInfo("    compiling fixed HLSL code with shader model %s, size = %Iu\n", tmpShaderModel, decompiledCode.size());
 
-	// TODO: Add #defines for StereoParams and IniParams
-
 	ID3DBlob *pErrorMsgs;
 	ID3DBlob *pCompiledOutput = NULL;
 	// Probably unecessary here since this shader is one we freshly decompiled,
@@ -1056,7 +1053,8 @@ static bool DecompileAndPossiblyPatchShader(__in UINT64 hash,
 	// include handler can correctly handle includes with paths relative to the
 	// shader itself:
 	wcstombs(apath, val, MAX_PATH);
-	hr = D3DCompile(decompiledCode.c_str(), decompiledCode.size(), apath, 0, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+	ShaderCompileMacros macros;
+	hr = D3DCompile(decompiledCode.c_str(), decompiledCode.size(), apath, macros.Get(), D3D_COMPILE_STANDARD_FILE_INCLUDE,
 		"main", tmpShaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pCompiledOutput, &pErrorMsgs);
 	LogInfo("    compile result of fixed HLSL shader: %x\n", hr);
 
