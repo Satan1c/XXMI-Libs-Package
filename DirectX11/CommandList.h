@@ -1181,7 +1181,8 @@ public:
 	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
 
 private:
-	void SetOrDeferResource(CommandListState* state, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
+	void CopyResourceToTarget(CommandListState* state, ResourceCopyTarget& dst_target, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	void SetOrDeferResource(CommandListState* state, ResourceCopyTarget& dst_target, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
 };
 
 // Adjacent resource copies between a contiguous range of shader resource
