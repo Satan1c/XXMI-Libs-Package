@@ -2417,12 +2417,13 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 
 	// XXX: If we allow the compilation to be customised further (e.g. with
 	// addition preprocessor defines), make the cache filename unique for
-	// each possible combination
+	// each possible combination. INI_PARAMS_REGISTER is one such define, and
+	// ini_params can move it, so its register is part of the name:
 	ext = wcsrchr(wpath, L'.');
 	if (ext > wcsrchr(wpath, L'\\'))
-		swprintf_s(cache_path, MAX_PATH, L"%.*s.%S.%x.bin", (int)(ext - wpath), wpath, shaderModel, (UINT)compile_flags);
+		swprintf_s(cache_path, MAX_PATH, L"%.*s.%S.%x.t%i.bin", (int)(ext - wpath), wpath, shaderModel, (UINT)compile_flags, G->IniParamsReg);
 	else
-		swprintf_s(cache_path, MAX_PATH, L"%s.%S.%x.bin", wpath, shaderModel, (UINT)compile_flags);
+		swprintf_s(cache_path, MAX_PATH, L"%s.%S.%x.t%i.bin", wpath, shaderModel, (UINT)compile_flags, G->IniParamsReg);
 
 	GetFileTime(f, NULL, NULL, &timestamp);
 	if (load_cached_shader(timestamp, cache_path, ppBytecode)) {
