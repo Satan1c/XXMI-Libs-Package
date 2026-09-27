@@ -6735,8 +6735,13 @@ public:
 			"#define cmp -\n";
 
 		if (G->IniParamsReg >= 0) {
+			// Bind through the define rather than the register it currently
+			// resolves to, so that moving ini_params does not invalidate a
+			// dumped shader. Dumps are compiled in the environment that
+			// defines it; to compile one elsewhere, substitute the register
+			// in this one line:
 			declaration +=
-				"Texture1D<float4> IniParams : register(t" + std::to_string(G->IniParamsReg) + ");\n";
+				"Texture1D<float4> IniParams : register(INI_PARAMS_REGISTER);\n";
 		}
 
 		if (G->StereoParamsReg >= 0) {
