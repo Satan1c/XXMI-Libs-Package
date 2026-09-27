@@ -1,7 +1,5 @@
 #include "ResourceHash.h"
 
-#include <bit>
-
 #include <INITGUID.h>
 #include "log.h"
 #include "util.h"
@@ -2383,6 +2381,20 @@ uint32_t GetRegionHash(HackerContext* context, ID3D11Buffer* buffer, UINT offset
 	return hash;
 }
 
+float BitCastToFloat(uint32_t bits)
+{
+	float value;
+	memcpy(&value, &bits, sizeof(value));
+	return value;
+}
+
+uint32_t BitCastToUint(float bits)
+{
+	uint32_t value;
+	memcpy(&value, &bits, sizeof(value));
+	return value;
+}
+
 float EncodeFloat30(const uint32_t hash)
 {
 	// IEEE-754 float layout:
@@ -2412,7 +2424,8 @@ float EncodeFloat30(const uint32_t hash)
 	// Construct the final IEEE-754 bit pattern.
 	uint32_t float_bits = (exponent << 23) | mantissa;
 
-	return std::bit_cast<float>(float_bits);
+	// TODO: Replace with std::bit_cast<float> after C++20 upgrade
+	return BitCastToFloat(float_bits);
 }
 
 uint64_t HashPointer(const void* p)
