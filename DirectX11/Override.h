@@ -127,7 +127,6 @@ class KeyOverrideBase : public virtual OverrideBase, public InputListener
 {
 };
 
-#pragma warning(suppress : 4250) // Suppress ParseIniSection inheritance via dominance warning
 class KeyOverride : public KeyOverrideBase, public Override
 {
 private:
