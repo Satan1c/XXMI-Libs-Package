@@ -1361,16 +1361,22 @@ void CheckTextureOverrideCommand::run(CommandListState *state)
 		return;
 
 	saved_this = state->this_target;
-	state->this_target = &target;
 	for (unsigned s = 0; s < count; s++) {
 		TextureOverrideMatches matches;
+		// Each slot of a range is checked through a local target, rather than
+		// rewriting the command's own, which every context running it shares:
+		ResourceCopyTarget slot_target;
+		ResourceCopyTarget &checked = target.IsRange() ? slot_target : target;
 
 		if (target.IsRange()) {
-			target.slot = (unsigned)first + s;
-			COMMAND_LIST_LOG(state, "  checktextureoverride = %s\n", slot_log_name(target, target.slot).c_str());
+			slot_target.type = target.type;
+			slot_target.shader_type = target.shader_type;
+			slot_target.slot = (unsigned)first + s;
+			COMMAND_LIST_LOG(state, "  checktextureoverride = %s\n", slot_log_name(slot_target, slot_target.slot).c_str());
 		}
 
-		target.FindTextureOverrides(state, NULL, &matches);
+		state->this_target = &checked;
+		checked.FindTextureOverrides(state, NULL, &matches);
 
 		if (run_pre_and_post_together) {
 			saved_post = state->post;
@@ -12945,12 +12951,6 @@ void ConditionalSlotCopyOperation::RunWithSource(CommandListState *state, ID3D11
 		COMMAND_LIST_LOG(state, "%S: no branch taken\n", ini_line.c_str());
 }
 
-// Walks a simple if/elif/else chain, checking that every reachable branch
-// either contains exactly one qualifying (bind ? is_batchable_bind :
-// is_batchable_fetch) operation for the same fixed stage+slot, or is empty
-// (only valid for the final branch, meaning "leave the current binding" -
-// the same thing unless_null already does for a batch). Mixing pre/post
-// within the chain is out of scope and bails out.
 // Whether an expression reads pipeline state (ps-t0, ps-t0->Width, ...).
 // Inside a batch the binds of the run are deferred to its end, so such a
 // condition would see the bindings from before the run rather than the ones
@@ -12965,6 +12965,12 @@ static bool expression_reads_pipeline(CommandListEvaluatable *node)
 	return false;
 }
 
+// Walks a simple if/elif/else chain, checking that every reachable branch
+// either contains exactly one qualifying (bind ? is_batchable_bind :
+// is_batchable_fetch) operation for the same fixed stage+slot, or is empty
+// (only valid for the final branch, meaning "leave the current binding" -
+// the same thing unless_null already does for a batch). Mixing pre/post
+// within the chain is out of scope and bails out.
 static bool collect_conditional_slot_chain(IfCommand *if_cmd, bool bind, wchar_t stage, unsigned slot,
 	std::vector<ConditionalSlotBranch> &out)
 {
