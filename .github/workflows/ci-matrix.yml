@@ -17,18 +17,6 @@ jobs:
       matrix:
         ref:
           - ranges/check-texture-override
-          - ranges/frame-analysis-dump
-          - slots/conditional-batching
-          - ci/spatial-hash-max-offset
-          - ci/pool-bind-flags-template-lookup
-          - ci/shader-error-blob-leak
-          - ci/cb-structure-byte-stride
-          - ci/copy-element-target
-          - ci/ini-params-define
-          - ci/decompiler-ini-params-macro
-          - ci/permissive-conformance
-          - ci/compound-assignment-expr
-
     name: ${{ matrix.ref }}
 
     steps:
