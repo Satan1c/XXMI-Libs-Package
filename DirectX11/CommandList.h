@@ -1173,6 +1173,14 @@ struct DeferredBinding {
 	bool assigned = false; // false: unless_null kept the current binding
 };
 
+// Which side of a batchable copy the batch owns: a bind batch drives the
+// destination slot, a fetch batch reads the source slot. Everything in the
+// optimiser that differs between the two is selected by this.
+enum class BatchDirection {
+	Bind,
+	Fetch,
+};
+
 class ResourceCopyOperation : public CommandListCommand {
 public:
 	ResourceCopyTarget src;
@@ -1196,6 +1204,9 @@ public:
 	void run(CommandListState*) override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
 	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
+	// The slot a batch groups this operation by. A folded if/elif/else chain
+	// overrides it, since the slot it drives is its branches', not its own:
+	virtual const ResourceCopyTarget& BatchTarget(BatchDirection direction) const;
 
 private:
 	void CopyResourceToTarget(CommandListState* state, ResourceCopyTarget& dst_target, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
@@ -1247,17 +1258,20 @@ struct ConditionalSlotBranch {
 // slot, folded by the optimiser into one operation so it can sit inside a
 // ShaderResourceBindBatch/FetchBatch instead of acting as a hard break.
 // Evaluates the conditions at run time and defers to whichever branch's
-// operation matched.
+// operation matched. Its own dst/src are never used: the copy belongs to the
+// branch, and the slot the batch groups by comes from BatchTarget().
 class ConditionalSlotCopyOperation : public ResourceCopyOperation {
 public:
-	bool bind = false;
+	BatchDirection direction = BatchDirection::Bind;
 	std::vector<ConditionalSlotBranch> branches;
-	// Keeps the original if/elif/else chain (and its CommandListExpressions,
-	// which `branches` points into) alive for as long as this operation is:
-	std::shared_ptr<CommandListCommand> owning_if;
+	// The chain this was folded from. Held because `branches` points into its
+	// CommandListExpressions, and because an operation left out of a batch
+	// goes back into the command list as the chain itself:
+	std::shared_ptr<CommandListCommand> source_if;
 
 	void run(CommandListState*) override;
 	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view) override;
+	const ResourceCopyTarget& BatchTarget(BatchDirection direction) const override;
 
 private:
 	// The branch whose condition holds, or NULL when no branch is taken:
