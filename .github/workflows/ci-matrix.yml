@@ -16,7 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         ref:
-          - recut/verify
+          - ci/step1
+          - ci/step2
+          - ci/step3
+          - ci/step4
+          - ci/step5
+          - ci/step6
+          - ci/step7
+          - ci/step8
 
     name: ${{ matrix.ref }}
 
