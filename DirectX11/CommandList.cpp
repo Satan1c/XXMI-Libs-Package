@@ -12939,7 +12939,10 @@ void ShaderResourceBindBatch::run(CommandListState *state)
 		if (binding.resource)
 			binding.resource->Release();
 
-		unsigned i = op->dst.slot - first_slot;
+		// Through BatchTarget(), not dst: a folded if/elif/else chain
+		// leaves its own dst unset, and the slot it drives is its
+		// branches'. Reading dst here would index from slot 0:
+		unsigned i = op->BatchTarget(BatchDirection::Bind).slot - first_slot;
 		if (views[i])
 			views[i]->Release();
 		views[i] = (ID3D11ShaderResourceView*)binding.view;
@@ -12964,7 +12967,9 @@ void ShaderResourceFetchBatch::run(CommandListState *state)
 	GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
 	for (auto &op : operations) {
-		ID3D11ShaderResourceView *view = views[op->src.slot - first_slot];
+		// Through BatchTarget(), not src, for the reason the bind batch
+		// gives above:
+		ID3D11ShaderResourceView *view = views[op->BatchTarget(BatchDirection::Fetch).slot - first_slot];
 		ID3D11Resource *resource = NULL;
 
 		if (view)
