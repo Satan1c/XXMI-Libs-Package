@@ -1,0 +1,39 @@
+name: PR Candidate Matrix
+
+on:
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ref:
+          - recut/batching
+
+    name: ${{ matrix.ref }}
+
+    steps:
+    - name: Checkout ${{ matrix.ref }}
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.ref }}
+        fetch-depth: 0
+
+    - name: Fetch upstream version tags
+      run: git fetch --no-tags https://github.com/SpectrumQT/XXMI-Libs-Package.git "refs/tags/v*:refs/tags/v*"
+
+    - name: Add MSBuild for VS2022 to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        vs-version: '[17.0,18.0)'
+
+    - name: Build solution
+      run: msbuild StereoVisionHacks.sln -property:Configuration="Zip Release" -property:Platform=x64 -target:rebuild -verbosity:minimal
