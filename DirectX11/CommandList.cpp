@@ -10129,7 +10129,12 @@ void ResourceCopyTarget::SetResource(
 		unordered_view = (ID3D11UnorderedAccessView*)view;
 		switch(shader_type) {
 		case L'p':
-			// XXX: Not clear if this will unbind other UAVs or not?
+			// Other UAV slots keep their bindings, but render targets
+			// do not: with NumRTVs = KEEP, D3D11 still unbinds every
+			// render target in a slot >= UAVStartSlot, along with
+			// anything (render target, shader resource, stream output
+			// target) sharing a subresource with this view. Binding
+			// ps-u2 therefore drops o2 and above.
 			// TODO: Allow pUAVInitialCounts to optionally be set
 			mOrigContext1->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,
 				NULL, NULL, slot, 1, &unordered_view, &uav_counter);
