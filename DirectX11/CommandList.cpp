@@ -6972,6 +6972,7 @@ void CustomResource::CopyMetadataFrom(const CustomResource& src)
 
 	bind_flags = src.bind_flags;
 	misc_flags = src.misc_flags;
+	uav_counter = src.uav_counter;
 
 	initial_data = src.initial_data;
 	initial_data_size = src.initial_data_size;
