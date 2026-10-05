@@ -10085,7 +10085,10 @@ void ResourceCopyTarget::SetResource(
 		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, NULL);
 
 		for (i = 0; i < D3D11_SO_STREAM_COUNT; i++) {
-			if (so_bufs[i])
+			// Every other slot holds the reference SOGetTargets()
+			// took, but this one holds the caller's, which it still
+			// owns, and SOSetTargets() has taken its own:
+			if (i != slot && so_bufs[i])
 				so_bufs[i]->Release();
 		}
 
