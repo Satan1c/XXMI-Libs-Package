@@ -9745,7 +9745,9 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		return buf;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		// XXX: Does not give us the offset
+		// D3D11 has no call that reports the offset a target was bound
+		// at, so an `so` source reads as offset 0 whatever the game set,
+		// and `->Region` on one measures from the start of the buffer:
 		mOrigContext1->SOGetTargets(slot + 1, so_bufs);
 
 		// Release any buffers we aren't after:
@@ -9954,6 +9956,7 @@ void ResourceCopyTarget::SetResource(
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
 	ID3D11Buffer *buf = NULL;
 	ID3D11Buffer *so_bufs[D3D11_SO_STREAM_COUNT];
+	UINT so_offsets[D3D11_SO_STREAM_COUNT] = {};
 	ID3D11ShaderResourceView *resource_view = NULL;
 	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
 	ID3D11DepthStencilView *depth_view = NULL;
@@ -10073,16 +10076,31 @@ void ResourceCopyTarget::SetResource(
 		break;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		// XXX: HERE BE UNTESTED CODE PATHS!
 		buf = (ID3D11Buffer*)res;
 		mOrigContext1->SOGetTargets(D3D11_SO_STREAM_COUNT, so_bufs);
 		if (so_bufs[slot])
 			so_bufs[slot]->Release();
 		so_bufs[slot] = buf;
-		// XXX: We set offsets to NULL here. We should really preserve
-		// them, but I'm not sure how to get their original values,
-		// so... too bad. Probably will never even use this anyway.
-		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, NULL);
+
+		// An offset has the shader write into part of the buffer rather
+		// than from the start of it, so a draw call can re-skin one
+		// object out of a mesh several of them share:
+		//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
+		//
+		// The slots this is not binding keep the offset 0 they were
+		// given when offsets were passed as NULL: SOGetTargets() does
+		// not report the offsets they were bound at, so there is nothing
+		// to put back.
+		//
+		// XXX: Passing (UINT)-1 for those slots may well be better: it
+		// means "append", so the stage carries on from wherever its last
+		// stream output write to that buffer ended instead of starting
+		// over and overwriting it. That is the closer thing to leaving a
+		// slot the ini line never mentioned alone, but it is a change in
+		// behaviour for those slots, so it wants testing of its own in a
+		// game that binds more than one stream output target.
+		so_offsets[slot] = offset;
+		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
 
 		for (i = 0; i < D3D11_SO_STREAM_COUNT; i++) {
 			// Every other slot holds the reference SOGetTargets()
