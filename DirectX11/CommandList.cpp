@@ -13173,16 +13173,6 @@ static std::shared_ptr<CommandListCommand> unbatched(const std::shared_ptr<Resou
 	return op;
 }
 
-// An operation that ends up outside any batch goes back into the list as it
-// was: for a folded if/elif/else chain that is the original IfCommand, so it
-// runs and logs exactly as before.
-static std::shared_ptr<CommandListCommand> unbatched(const std::shared_ptr<ResourceCopyOperation> &op)
-{
-	if (auto folded = std::dynamic_pointer_cast<ConditionalSlotCopyOperation>(op))
-		return folded->owning_if;
-	return op;
-}
-
 // Wraps the operations of a run that fall within [first, last] into a single
 // bind / fetch batch and appends it to out. A range holding a single
 // operation is not worth a batch, that operation is appended as is.
