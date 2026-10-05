@@ -6285,6 +6285,7 @@ CustomResource::CustomResource() :
 	offset(0),
 	buf_size(0),
 	format(DXGI_FORMAT_UNKNOWN),
+	uav_counter((UINT)-1),
 	source_stride(0),
 	max_copies_per_frame(0),
 	frame_no(0),
@@ -9629,7 +9630,8 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		UINT *offset,        // Used by vertex & index buffers
 		DXGI_FORMAT *format, // Used by index buffers
 		UINT *buf_size,      // Used when creating a view of the buffer
-		ResourceCopyTarget *dst) // Used to get bind flags when substantiating a custom resource
+		ResourceCopyTarget *dst, // Used to get bind flags when substantiating a custom resource
+		UINT *uav_counter)   // Used by UAVs
 {
 	HackerDevice *mHackerDevice = state->mHackerDevice;
 	ID3D11Device1 *mOrigDevice1 = state->mOrigDevice1;
@@ -9846,6 +9848,8 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 				*format = custom_resource->format;
 			if (buf_size)
 				*buf_size = custom_resource->buf_size;
+			if (uav_counter)
+				*uav_counter = custom_resource->uav_counter;
 
 			if (custom_resource->is_null) {
 				// Optimisation to allow the resource to be set to null
@@ -9891,7 +9895,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
-			return state->this_target->GetResource(state, view, stride, offset, format, buf_size);
+			return state->this_target->GetResource(state, view, stride, offset, format, buf_size, dst, uav_counter);
 
 		if (state->resource) {
 			if (state->view)
@@ -9949,7 +9953,8 @@ void ResourceCopyTarget::SetResource(
 		UINT stride,
 		UINT offset,
 		DXGI_FORMAT format,
-		UINT buf_size)
+		UINT buf_size,
+		UINT uav_counter)
 {
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
 	ID3D11Buffer *buf = NULL;
@@ -9958,7 +9963,6 @@ void ResourceCopyTarget::SetResource(
 	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
 	ID3D11DepthStencilView *depth_view = NULL;
 	ID3D11UnorderedAccessView *unordered_view = NULL;
-	UINT uav_counter = -1; // TODO: Allow this to be set
 	int i;
 
 	// Shadows the member for the dynamic slot case (ps-t[$i]):
@@ -10137,12 +10141,10 @@ void ResourceCopyTarget::SetResource(
 			// anything (render target, shader resource, stream output
 			// target) sharing a subresource with this view. Binding
 			// ps-u2 therefore drops o2 and above.
-			// TODO: Allow pUAVInitialCounts to optionally be set
 			mOrigContext1->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,
 				NULL, NULL, slot, 1, &unordered_view, &uav_counter);
 			return;
 		case L'c':
-			// TODO: Allow pUAVInitialCounts to optionally be set
 			mOrigContext1->CSSetUnorderedAccessViews(slot, 1, &unordered_view, &uav_counter);
 			return;
 		default:
@@ -10194,7 +10196,7 @@ void ResourceCopyTarget::SetResource(
 	}
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
-			return state->this_target->SetResource(state, res, view, stride, offset, format, buf_size);
+			return state->this_target->SetResource(state, res, view, stride, offset, format, buf_size, uav_counter);
 
 		if (state->resource) {
 			if (*state->resource)
@@ -12457,7 +12459,7 @@ static ID3D11View* UsableRefView(ResourceCopyTarget *dst, CommandListState *stat
 }
 
 void ResourceCopyOperation::CopyResourceToResource(
-	CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size
+	CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size, UINT uav_counter
 )
 {
 	if (!src_resource) {
@@ -12612,7 +12614,7 @@ void ResourceCopyOperation::CopyResourceToResource(
 		buf_dst_size = 0;
 	}
 
-	SetOrDeferResource(state, dst_resource, dst_view, stride, offset, format, buf_dst_size);
+	SetOrDeferResource(state, dst_resource, dst_view, stride, offset, format, buf_dst_size, uav_counter);
 
 	if (options & ResourceCopyOptions::SET_VIEWPORT)
 		SetViewportFromResource(state, dst_resource);
@@ -12653,10 +12655,10 @@ void ResourceCopyOperation::CopyResourceToPool(
 }
 
 void ResourceCopyOperation::SetOrDeferResource(CommandListState *state,
-		ID3D11Resource *res, ID3D11View *view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size)
+		ID3D11Resource *res, ID3D11View *view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, UINT uav_counter)
 {
 	if (!deferred) {
-		dst.SetResource(state, res, view, stride, offset, format, buf_size);
+		dst.SetResource(state, res, view, stride, offset, format, buf_size, uav_counter);
 		return;
 	}
 
@@ -12695,8 +12697,9 @@ void ResourceCopyOperation::run(CommandListState *state)
 	UINT offset = 0;
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 	UINT buf_src_size = 0;
+	UINT uav_counter = (UINT)-1;
 
-	src_resource = src.GetResource(state, &src_view, &stride, &offset, &format, &buf_src_size, ((options & ResourceCopyOptions::REFERENCE) ? &dst : NULL));
+	src_resource = src.GetResource(state, &src_view, &stride, &offset, &format, &buf_src_size, ((options & ResourceCopyOptions::REFERENCE) ? &dst : NULL), &uav_counter);
 	
 	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION)
 	{
@@ -12711,7 +12714,7 @@ void ResourceCopyOperation::run(CommandListState *state)
 		break;
 
 	default:
-		CopyResourceToResource(state, src_resource, src_view, stride, offset, format, buf_src_size);
+		CopyResourceToResource(state, src_resource, src_view, stride, offset, format, buf_src_size, uav_counter);
 		break;
 	}
 
@@ -12992,8 +12995,14 @@ struct SlotRangeBindings {
 	ID3D11Buffer *buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
 	UINT cb_offsets[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
 	UINT cb_sizes[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+	// Sized like views rather than to the UAV slot count, since the index is
+	// the range's and a shader resource range reaches further:
+	UINT uav_counters[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
 
-	explicit SlotRangeBindings(bool is_cb) : is_cb(is_cb) {}
+	explicit SlotRangeBindings(bool is_cb) : is_cb(is_cb)
+	{
+		std::fill_n(uav_counters, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, (UINT)-1);
+	}
 	SlotRangeBindings(const SlotRangeBindings&) = delete;
 	SlotRangeBindings& operator=(const SlotRangeBindings&) = delete;
 
@@ -13101,11 +13110,9 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 static void SetSlotRange(CommandListState *state, ResourceCopyTarget &target, unsigned first, unsigned count, const SlotRangeBindings &bindings)
 {
 	ID3D11DeviceContext1 *context = state->mOrigContext1;
-	UINT uav_counters[D3D11_1_UAV_SLOT_COUNT]; // TODO: Allow these to be set
 	UINT cb_first[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 	UINT cb_counts[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 	bool cb_regions = false;
-	std::fill_n(uav_counters, D3D11_1_UAV_SLOT_COUNT, (UINT)-1);
 
 	if (target.type == ResourceCopyTargetType::CONSTANT_BUFFER) {
 		// Same split as SetResource(): a region of a buffer needs
@@ -13134,10 +13141,10 @@ static void SetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 		break;
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		if (target.shader_type == L'c')
-			context->CSSetUnorderedAccessViews(first, count, (ID3D11UnorderedAccessView *const *)bindings.views, uav_counters);
+			context->CSSetUnorderedAccessViews(first, count, (ID3D11UnorderedAccessView *const *)bindings.views, bindings.uav_counters);
 		else
 			context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, NULL, NULL,
-				first, count, (ID3D11UnorderedAccessView *const *)bindings.views, uav_counters);
+				first, count, (ID3D11UnorderedAccessView *const *)bindings.views, bindings.uav_counters);
 		break;
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 		if (cb_regions) {
@@ -13371,9 +13378,11 @@ void SlotRangeCopyOperation::BindSlotOp(CommandListState *state, SlotRangeBindin
 		resource->Release();
 
 	// Nothing assigned means unless_null found a null source and the slot
-	// keeps whatever it was bound to:
-	if (binding.assigned)
+	// keeps whatever it was bound to, counter included:
+	if (binding.assigned) {
 		bindings.Take(index, binding);
+		bindings.uav_counters[index] = source ? source->uav_counter : (UINT)-1;
+	}
 }
 
 // Binds the source resource itself, through a view of the slot's type where
@@ -13407,6 +13416,7 @@ void SlotRangeCopyOperation::BindSlotRef(CommandListState *state, SlotRangeBindi
 	Profiling::resource_reference_copies++;
 
 	bindings.Release(index);
+	bindings.uav_counters[index] = source->uav_counter;
 	if (bindings.is_cb) {
 		bindings.buffers[index] = (ID3D11Buffer*)resource; // takes the GetResource() reference
 	} else {

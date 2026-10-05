@@ -565,6 +565,11 @@ public:
 	UINT buf_size;
 	DXGI_FORMAT format;
 
+	// Applied whenever this resource is bound to a UAV slot. -1 leaves the
+	// count alone, and is all D3D11 ever does for a view not created as an
+	// append or counter buffer:
+	UINT uav_counter;
+
 	UINT source_stride;
 
 	int max_copies_per_frame;
@@ -1061,14 +1066,16 @@ public:
 			UINT *offset,
 			DXGI_FORMAT *format,
 			UINT *buf_size,
-			ResourceCopyTarget *dst=NULL);
+			ResourceCopyTarget *dst=NULL,
+			UINT *uav_counter=NULL);
 	void SetResource(CommandListState *state,
 			ID3D11Resource *res,
 			ID3D11View *view,
 			UINT stride,
 			UINT offset,
 			DXGI_FORMAT format,
-			UINT buf_size);
+			UINT buf_size,
+			UINT uav_counter=(UINT)-1);
 
 	void FindTextureOverrides(
 			CommandListState *state,
@@ -1190,7 +1197,7 @@ public:
 	ResourceCopyOperation();
 	~ResourceCopyOperation();
 
-	void CopyResourceToResource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	void CopyResourceToResource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size, UINT uav_counter=(UINT)-1);
 	void CopyResourceToPool(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
 
 	void run(CommandListState*) override;
@@ -1198,7 +1205,7 @@ public:
 	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
 
 private:
-	void SetOrDeferResource(CommandListState* state, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
+	void SetOrDeferResource(CommandListState* state, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, UINT uav_counter=(UINT)-1);
 };
 
 // Adjacent resource copies between a contiguous range of shader resource

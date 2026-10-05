@@ -2102,6 +2102,7 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 	custom_resource->override_msaa_quality = GetIniInt(section_name, L"msaa_quality", -1, NULL);
 	custom_resource->override_byte_width = GetIniInt(section_name, L"byte_width", -1, NULL);
 	custom_resource->override_stride = GetIniInt(section_name, L"stride", -1, NULL);
+	custom_resource->uav_counter = (UINT)GetIniInt(section_name, L"uav_counter", -1, NULL);
 
 	custom_resource->width_multiply = GetIniFloat(section_name, L"width_multiply", 1.0f, NULL);
 	custom_resource->height_multiply = GetIniFloat(section_name, L"height_multiply", 1.0f, NULL);
