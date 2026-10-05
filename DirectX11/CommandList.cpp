@@ -10125,10 +10125,12 @@ void ResourceCopyTarget::SetResource(
 		break;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
-		// XXX: HERE BE UNTESTED CODE PATHS!
 		unordered_view = (ID3D11UnorderedAccessView*)view;
 		switch(shader_type) {
 		case L'p':
+			// XXX: UNTESTED CODE PATH - unlike the compute shader case
+			// below, which is used in practice.
+			//
 			// Other UAV slots keep their bindings, but render targets
 			// do not: with NumRTVs = KEEP, D3D11 still unbinds every
 			// render target in a slot >= UAVStartSlot, along with
