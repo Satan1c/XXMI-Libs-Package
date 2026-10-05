@@ -104,7 +104,7 @@ Dumping a pool element does not count as updating it, so it does not postpone [e
 CheckTextureOverride = ps-t[0:9]  ; Same as CheckTextureOverride = ps-t0 ... ps-t9
 ```
 
-Pool ranges are not supported by `CheckTextureOverride`. Other commands do not accept ranges.
+Pool ranges are not supported by `CheckTextureOverride`. Commands other than `dump` and `CheckTextureOverride` do not accept ranges.
 
 ## Examples
 
