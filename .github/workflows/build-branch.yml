@@ -36,9 +36,16 @@ jobs:
     - name: Build solution
       run: msbuild StereoVisionHacks.sln -property:Configuration="Zip Release" -property:Platform=x64 -target:rebuild -verbosity:minimal
 
+    # A branch name may contain slashes, an artifact name may not, so every
+    # branch but dev would otherwise lose its DLLs at the upload step:
+    - name: Name the artifact after the branch
+      run: |
+        $name = "XXMI-PACKAGE-" + ($env:GITHUB_REF_NAME -replace '/', '-')
+        "artifact_name=$name" >> $env:GITHUB_ENV
+
     - name: Upload DLLs
       uses: actions/upload-artifact@v4
       with:
-        name: XXMI-PACKAGE-${{ github.ref_name }}
+        name: ${{ env.artifact_name }}
         path: x64/Zip Release/*.dll
         if-no-files-found: error
