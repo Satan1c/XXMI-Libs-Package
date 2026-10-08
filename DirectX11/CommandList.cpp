@@ -1567,17 +1567,12 @@ void DrawCommand::do_indirect_draw_call(CommandListState *state, const char *nam
 		ID3D11Buffer *pBufferForArgs,
 		UINT AlignedByteOffsetForArgs))
 {
-	ID3D11Resource *resource = NULL;
-	ID3D11View *view = NULL;
-	UINT stride = 0;
-	UINT offset = 0;
-	UINT buf_size = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	ResourceCopyInfo info;
 	UINT arg = (UINT)args[0].evaluate(state);
 
-	resource = indirect_buffer.GetResource(state, &view, &stride, &offset, &format, NULL);
-	if (view)
-		view->Release();
+	ID3D11Resource *resource = indirect_buffer.GetResource(state, &info);
+	if (info.view)
+		info.view->Release();
 
 	if (!resource) {
 		COMMAND_LIST_LOG(state, "[%S] %s(%p, %u) -> INDIRECT BUFFER IS NULL\n",
@@ -1760,8 +1755,8 @@ void StoreCommand::run(CommandListState* state)
 	HackerContext* hacker_context = state->mHackerContext;
 	ID3D11DeviceContext* orig_context = state->mOrigContext1;
 
-	ID3D11View* src_view = nullptr;
-	ID3D11Resource* src_resource = src.GetResource(state, &src_view, nullptr, nullptr, nullptr, nullptr, nullptr);
+	ResourceCopyInfo src_info;
+	ID3D11Resource* src_resource = src.GetResource(state, &src_info);
 
 	if (!src_resource)
 	{
@@ -2111,16 +2106,15 @@ static DXGI_FORMAT GetTextureFormat(ID3D11Resource* resource, D3D11_RESOURCE_DIM
 	}
 }
 
-static void FillInMissingInfo(
-	ResourceCopyTargetType type,
-	ID3D11Resource* resource,
-	ID3D11View* view,
-	UINT* stride,
-	UINT* offset,
-	UINT* buf_size,
-	DXGI_FORMAT* format)
+static void FillInMissingInfo(ResourceCopyTargetType type, ID3D11Resource *resource, ResourceCopyInfo *info)
 {
+	ID3D11View *view = info->view;
+	UINT *stride = &info->stride;
+	UINT *offset = &info->offset;
+	UINT *buf_size = &info->size;
+	DXGI_FORMAT *format = &info->format;
 	D3D11_RESOURCE_DIMENSION dimension;
+
 	resource->GetType(&dimension);
 
 	// Some of these values may already have been supplied by the caller.
@@ -2190,12 +2184,7 @@ static void FillInMissingInfo(
 
 void FrameAnalysisDumpCommand::run(CommandListState *state)
 {
-	ID3D11Resource *resource = NULL;
-	ID3D11View *view = NULL;
-	UINT stride = 0;
-	UINT offset = 0;
-	UINT buf_size = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	ResourceCopyInfo info;
 
 	// Fast exit if frame analysis is currently inactive:
 	if (!G->analyse_frame)
@@ -2234,7 +2223,7 @@ void FrameAnalysisDumpCommand::run(CommandListState *state)
 			}
 		}
 
-		resource = source.GetResource(state, &view, &stride, &offset, &format, NULL);
+		ID3D11Resource *resource = source.GetResource(state, &info);
 		if (!resource) {
 			COMMAND_LIST_LOG(state, "  No resource to dump (%S)\n", name.c_str());
 			continue;
@@ -2243,17 +2232,14 @@ void FrameAnalysisDumpCommand::run(CommandListState *state)
 		// Fill in any missing info before handing it to frame analysis. The
 		// format is particularly important to try to avoid saving TYPELESS
 		// resources:
-		FillInMissingInfo(target.type, resource, view, &stride, &offset, &buf_size, &format);
+		FillInMissingInfo(target.type, resource, &info);
 
-		state->mHackerContext->FrameAnalysisDump(resource, analyse_options, name.c_str(), format, stride, offset);
+		state->mHackerContext->FrameAnalysisDump(resource, analyse_options, name.c_str(), info.format, info.stride, info.offset);
 
 		resource->Release();
-		if (view)
-			view->Release();
-		resource = NULL;
-		view = NULL;
-		stride = offset = buf_size = 0;
-		format = DXGI_FORMAT_UNKNOWN;
+		if (info.view)
+			info.view->Release();
+		info = ResourceCopyInfo();
 	}
 }
 
@@ -9929,7 +9915,7 @@ static void SetUnorderedAccessViewsBatch(ID3D11DeviceContext1 *context, wchar_t 
 // The resource a view a Get call just handed us is of, passing the view's
 // reference on to the caller through *view. A view of nothing is released here
 // and reads as no resource at all, which is also what an empty slot reads as.
-static ID3D11Resource *resource_from_view(ID3D11View *slot_view, ID3D11View **view)
+static ID3D11Resource *resource_from_view(ID3D11View *slot_view, ResourceCopyInfo *info)
 {
 	ID3D11Resource *res = NULL;
 
@@ -9942,18 +9928,18 @@ static ID3D11Resource *resource_from_view(ID3D11View *slot_view, ID3D11View **vi
 		return NULL;
 	}
 
-	*view = slot_view;
+	info->view = slot_view;
 	return res;
 }
 
 // A resource the fork holds itself, rather than one read back from the pipeline:
 // the caller is given a reference of its own on both it and its view, since it
 // releases what it is handed and these have to outlive that.
-static ID3D11Resource *share_resource(ID3D11Resource *res, ID3D11View *held_view, ID3D11View **view)
+static ID3D11Resource *share_resource(ID3D11Resource *res, ID3D11View *held_view, ResourceCopyInfo *info)
 {
 	if (held_view)
 		held_view->AddRef();
-	*view = held_view;
+	info->view = held_view;
 
 	if (res)
 		res->AddRef();
@@ -9981,15 +9967,7 @@ static ID3D11Resource *get_back_buffer(CommandListState *state, bool fake, const
 	return res;
 }
 
-ID3D11Resource *ResourceCopyTarget::GetResource(
-		CommandListState *state,
-		ID3D11View **view,   // Used by textures, render targets, depth/stencil buffers & UAVs
-		UINT *stride,        // Used by vertex buffers
-		UINT *offset,        // Used by vertex & index buffers
-		DXGI_FORMAT *format, // Used by index buffers
-		UINT *buf_size,      // Used when creating a view of the buffer
-		ResourceCopyTarget *dst, // Used to get bind flags when substantiating a custom resource
-		UINT *uav_counter)   // Used by UAVs
+ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst)
 {
 	HackerDevice *mHackerDevice = state->mHackerDevice;
 	ID3D11Device1 *mOrigDevice1 = state->mOrigDevice1;
@@ -10011,24 +9989,21 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 	{
-		GetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf, offset, buf_size);
+		GetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf, &info->offset, &info->size);
 
 		// Derive data offset in bytes from FirstConstant, where each constant is 16 bytes long (4 * 32-bit components).
 		// FirstConstant specifies index of the first constant of CB region that is currently visible to shaders (bound via VSSetConstantBuffers1).
-		// Runtime sets *FirstConstant (pointer!) to NULL if it is not defined in VSSetConstantBuffers(1) call used to bind CB.
-		if (offset)
-			*offset *= 16;
+		// A buffer bound without a region reads back as 0 for both, which is the whole buffer.
+		info->offset *= 16;
 		// Derive data size in bytes from NumConstants, where each constant is 16 bytes long (4 * 32-bit components).
 		// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
-		// Runtime sets *NumConstants (pointer!) to NULL if it is not defined in VSSetConstantBuffers(1) call used to bind CB.
-		if (buf_size)
-			*buf_size *= 16;
+		info->size *= 16;
 
 		return buf;
 	}
 	case ResourceCopyTargetType::SHADER_RESOURCE:
 		GetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
-		return resource_from_view(resource_view, view);
+		return resource_from_view(resource_view, info);
 
 	// TODO: case ResourceCopyTargetType::SAMPLER: // Not an ID3D11Resource, need to think about this one
 	// TODO: 	break;
@@ -10037,15 +10012,14 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		// TODO: If copying this to a constant buffer, provide some
 		// means to get the strides + offsets from within the shader.
 		// Perhaps as an IniParam, or in another constant buffer?
-		mOrigContext1->IAGetVertexBuffers(slot, 1, &buf, stride, offset);
+		mOrigContext1->IAGetVertexBuffers(slot, 1, &buf, &info->stride, &info->offset);
 		return buf;
 
 	case ResourceCopyTargetType::INDEX_BUFFER:
 		// TODO: Similar comment as vertex buffers above, provide a
 		// means for a shader to get format + offset.
-		mOrigContext1->IAGetIndexBuffer(&buf, format, offset);
-		if (stride && format)
-			*stride = dxgi_format_size(*format);
+		mOrigContext1->IAGetIndexBuffer(&buf, &info->format, &info->offset);
+		info->stride = dxgi_format_size(info->format);
 		return buf;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
@@ -10057,16 +10031,16 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 
 	case ResourceCopyTargetType::RENDER_TARGET:
 		mOrigContext1->OMGetRenderTargets(slot + 1, render_view, NULL);
-		return resource_from_view(take_slot(render_view, slot), view);
+		return resource_from_view(take_slot(render_view, slot), info);
 
 	case ResourceCopyTargetType::DEPTH_STENCIL_TARGET:
 		// Depth buffers can't be buffers, so there is no stride or size to report:
 		mOrigContext1->OMGetRenderTargets(0, NULL, &depth_view);
-		return resource_from_view(depth_view, view);
+		return resource_from_view(depth_view, info);
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		GetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view);
-		return resource_from_view(unordered_view, view);
+		return resource_from_view(unordered_view, info);
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
 		{
@@ -10082,45 +10056,40 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 
 			custom_resource->Substantiate(mOrigDevice1, bind_flags, misc_flags);
 
-			if (stride)
-				*stride = custom_resource->stride;
-			if (offset)
-				*offset = custom_resource->offset;
-			if (format)
-				*format = custom_resource->format;
-			if (buf_size)
-				*buf_size = custom_resource->buf_size;
-			if (uav_counter)
-				*uav_counter = custom_resource->uav_counter;
+			info->stride = custom_resource->stride;
+			info->offset = custom_resource->offset;
+			info->format = custom_resource->format;
+			info->size = custom_resource->buf_size;
+			info->uav_counter = custom_resource->uav_counter;
 
 			if (custom_resource->is_null) {
 				// Optimisation to allow the resource to be set to null
 				// without throwing away the cache so we don't
 				// endlessly create & destroy temporary resources.
-				*view = NULL;
+				info->view = NULL;
 				return NULL;
 			}
 
-			return share_resource(custom_resource->resource, custom_resource->view, view);
+			return share_resource(custom_resource->resource, custom_resource->view, info);
 		}
 
 	case ResourceCopyTargetType::INI_PARAMS:
-		return share_resource(mHackerDevice->mIniTexture, mHackerDevice->mIniResourceView, view);
+		return share_resource(mHackerDevice->mIniTexture, mHackerDevice->mIniResourceView, info);
 
 	case ResourceCopyTargetType::CURSOR_MASK:
 		UpdateCursorResources(state);
-		return share_resource(state->cursor_mask_tex, state->cursor_mask_view, view);
+		return share_resource(state->cursor_mask_tex, state->cursor_mask_view, info);
 
 	case ResourceCopyTargetType::CURSOR_COLOR:
 		UpdateCursorResources(state);
-		return share_resource(state->cursor_color_tex, state->cursor_color_view, view);
+		return share_resource(state->cursor_color_tex, state->cursor_color_view, info);
 
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
-			return state->this_target->GetResource(state, view, stride, offset, format, buf_size, dst, uav_counter);
+			return state->this_target->GetResource(state, info, dst);
 
 		if (state->resource)
-			return share_resource(*state->resource, state->view, view);
+			return share_resource(*state->resource, state->view, info);
 
 		COMMAND_LIST_LOG(state, "  \"this\"  is not valid in this context\n");
 		return NULL;
@@ -10432,11 +10401,8 @@ D3D11_BIND_FLAG ResourceCopyTarget::BindFlags(CommandListState *state, D3D11_RES
 
 void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *resource_found, TextureOverrideMatches *matches)
 {
-	ID3D11View *view = NULL;
-	UINT stride = 0, offset = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-
-	ID3D11Resource* resource = GetResource(state, &view, &stride, &offset, &format, NULL);
+	ResourceCopyInfo info;
+	ID3D11Resource* resource = GetResource(state, &info);
 
 	if (resource_found)
 		*resource_found = !!resource;
@@ -10457,13 +10423,13 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 		UINT region_offset = 0, region_size = 0;
 		switch (this->type) {
 			case ResourceCopyTargetType::VERTEX_BUFFER:
-				region_offset = GetVertexBufferRegionOffset(stride, state->call_info, offset);
-				region_size = GetVertexBufferRegionSize(stride, state->call_info);
+				region_offset = GetVertexBufferRegionOffset(info.stride, state->call_info, info.offset);
+				region_size = GetVertexBufferRegionSize(info.stride, state->call_info);
 				break;
 
 			case ResourceCopyTargetType::INDEX_BUFFER:
-				region_offset = GetIndexBufferRegionOffset(format, state->call_info, offset);
-				region_size = GetIndexBufferRegionSize(format, state->call_info);
+				region_offset = GetIndexBufferRegionOffset(info.format, state->call_info, info.offset);
+				region_size = GetIndexBufferRegionSize(info.format, state->call_info);
 				break;
 		}
 
@@ -10525,14 +10491,14 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 	//COMMAND_LIST_LOG(state, "  found texture hash = %08llx\n", hash);
 
 	resource->Release();
-	if (view)
-		view->Release();
+	if (info.view)
+		info.view->Release();
 }
 
 float ResourceCopyTarget::GetResourceId(CommandListState* state)
 {
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	ResourceCopyInfo info;
+	ID3D11Resource* resource = GetResource(state, &info);
 
 	if (!resource)
 		return 0.0f;
@@ -10540,8 +10506,8 @@ float ResourceCopyTarget::GetResourceId(CommandListState* state)
 	// Hash 64-bit pointer to mix bits
 	uint64_t hash = HashPointer(resource);
 	resource->Release();
-	if (view)
-		view->Release();
+	if (info.view)
+		info.view->Release();
 
 	// Encode 64-bit hash as float30 to preserve as much precision as possible at low cost.
 	return EncodeFloat30((uint32_t)hash);
@@ -10677,7 +10643,7 @@ float ResourceCopyTarget::ResourceProperty(CommandListState *state, ReadProperty
 {
 	ResourceCopyInfo info;
 
-	info.resource = GetResource(state, &info.view, &info.stride, &info.offset, &info.format, &info.size);
+	info.resource = GetResource(state, &info);
 
 	float ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
 	if (info.resource) {
@@ -10849,7 +10815,7 @@ D3D11_BIND_FLAG ResourceCopyTarget::GetResourceBindFlags(CommandListState *state
 	// Not through ResourceProperty(): bind flags are not a float, and a target
 	// with nothing bound simply has none, which 0 already says.
 	ResourceCopyInfo info;
-	info.resource = GetResource(state, &info.view, &info.stride, &info.offset, &info.format, &info.size);
+	info.resource = GetResource(state, &info);
 
 	D3D11_BIND_FLAG ret = (D3D11_BIND_FLAG)0;
 	if (info.resource) {
@@ -11822,14 +11788,8 @@ template <typename ViewType,
 			 const DescType *pDesc,
 			 ViewType **ppView)
 	>
-static ID3D11View* _CreateCompatibleView(
-		ID3D11Resource *resource,
-		CommandListState *state,
-		UINT stride,
-		UINT offset,
-		DXGI_FORMAT format,
-		UINT buf_src_size,
-		ResourceCopyOptions options)
+static ID3D11View* _CreateCompatibleView(ID3D11Resource *resource, CommandListState *state,
+		const ResourceCopyInfo &info, ResourceCopyOptions options)
 {
 	D3D11_RESOURCE_DIMENSION dimension;
 	ID3D11Buffer *buf;
@@ -11848,10 +11808,10 @@ static ID3D11View* _CreateCompatibleView(
 			// description as DirectX doesn't have enough information from the
 			// buffer alone to create a view.
 
-			view_desc.Format = format;
+			view_desc.Format = info.format;
 
 			buf = (ID3D11Buffer*)resource;
-			pDesc = FillOutBufferDesc(buf, &view_desc, stride, offset, buf_src_size, options);
+			pDesc = FillOutBufferDesc(buf, &view_desc, info.stride, info.offset, info.size, options);
 
 			// This should already handle things like:
 			// - Copying a vertex buffer to a SRV or constant buffer
@@ -11877,15 +11837,15 @@ static ID3D11View* _CreateCompatibleView(
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 			tex1d = (ID3D11Texture1D*)resource;
 			tex1d->GetDesc(&tex1d_desc);
-			pDesc = FillOutTex1DDesc(&view_desc, &tex1d_desc, format);
+			pDesc = FillOutTex1DDesc(&view_desc, &tex1d_desc, info.format);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
 			tex2d = (ID3D11Texture2D*)resource;
 			tex2d->GetDesc(&tex2d_desc);
-			pDesc = FillOutTex2DDesc(&view_desc, &tex2d_desc, format);
+			pDesc = FillOutTex2DDesc(&view_desc, &tex2d_desc, info.format);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-			pDesc = FillOutTex3DDesc(&view_desc, format);
+			pDesc = FillOutTex3DDesc(&view_desc, info.format);
 			break;
 	}
 
@@ -11904,40 +11864,33 @@ static ID3D11View* _CreateCompatibleView(
 	return view;
 }
 
-static ID3D11View* CreateCompatibleView(
-		ResourceCopyTarget *dst,
-		ID3D11Resource *resource,
-		CommandListState *state,
-		UINT stride,
-		UINT offset,
-		DXGI_FORMAT format,
-		UINT buf_src_size,
-		ResourceCopyOptions options)
+static ID3D11View* CreateCompatibleView(ResourceCopyTarget *dst, ID3D11Resource *resource,
+		CommandListState *state, const ResourceCopyInfo &info, ResourceCopyOptions options)
 {
 	switch (dst->type) {
 		case ResourceCopyTargetType::SHADER_RESOURCE:
 			return _CreateCompatibleView<ID3D11ShaderResourceView,
 			       D3D11_SHADER_RESOURCE_VIEW_DESC,
 			       &ID3D11Device::CreateShaderResourceView>
-				       (resource, state, stride, offset, format, buf_src_size, options);
+				       (resource, state, info, options);
 		case ResourceCopyTargetType::RENDER_TARGET:
 			return _CreateCompatibleView<ID3D11RenderTargetView,
 			       D3D11_RENDER_TARGET_VIEW_DESC,
 			       &ID3D11Device::CreateRenderTargetView>
-				       (resource, state, stride, offset, format, buf_src_size, options);
+				       (resource, state, info, options);
 		case ResourceCopyTargetType::DEPTH_STENCIL_TARGET:
 			return _CreateCompatibleView<ID3D11DepthStencilView,
 			       D3D11_DEPTH_STENCIL_VIEW_DESC,
 			       &ID3D11Device::CreateDepthStencilView>
-				       (resource, state, stride, offset, format, buf_src_size, options);
+				       (resource, state, info, options);
 		case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 			return _CreateCompatibleView<ID3D11UnorderedAccessView,
 			       D3D11_UNORDERED_ACCESS_VIEW_DESC,
 			       &ID3D11Device::CreateUnorderedAccessView>
-				       (resource, state, stride, offset, format, buf_src_size, options);
+				       (resource, state, info, options);
 		case ResourceCopyTargetType::THIS_RESOURCE:
 			if (state->this_target)
-				return CreateCompatibleView(state->this_target, resource, state, stride, offset, format, buf_src_size, options);
+				return CreateCompatibleView(state->this_target, resource, state, info, options);
 			break;
 	}
 	return NULL;
@@ -12110,13 +12063,9 @@ static UINT get_resource_bind_flags(ID3D11Resource *resource)
 	return 0;
 }
 
-ID3D11View* ClearViewCommand::create_best_view(
-		ID3D11Resource *resource,
-		CommandListState *state,
-		UINT stride,
-		UINT offset,
-		DXGI_FORMAT format,
-		UINT buf_src_size)
+// info is by value: there was no view to describe the resource with, so the gaps
+// are filled in here from the resource itself.
+ID3D11View* ClearViewCommand::create_best_view(ID3D11Resource *resource, CommandListState *state, ResourceCopyInfo info)
 {
 	UINT bind_flags;
 
@@ -12128,8 +12077,7 @@ ID3D11View* ClearViewCommand::create_best_view(
 	// which type? We will guess based on what the user specified
 	// and what bind flags the resource has.
 
-	FillInMissingInfo(target.type, resource, NULL, &stride, &offset,
-			&buf_src_size, &format);
+	FillInMissingInfo(target.type, resource, &info);
 
 	// If the user specified "depth" and/or "stencil" they gave us
 	// the answer:
@@ -12137,7 +12085,7 @@ ID3D11View* ClearViewCommand::create_best_view(
 		return _CreateCompatibleView<ID3D11DepthStencilView,
 		       D3D11_DEPTH_STENCIL_VIEW_DESC,
 		       &ID3D11Device::CreateDepthStencilView>
-			       (resource, state, stride, offset, format, buf_src_size, options);
+			       (resource, state, info, options);
 	}
 
 	// If the user specified "int" or used a hex string then it
@@ -12146,7 +12094,7 @@ ID3D11View* ClearViewCommand::create_best_view(
 		return _CreateCompatibleView<ID3D11UnorderedAccessView,
 		       D3D11_UNORDERED_ACCESS_VIEW_DESC,
 		       &ID3D11Device::CreateUnorderedAccessView>
-			       (resource, state, stride, offset, format, buf_src_size, options);
+			       (resource, state, info, options);
 	}
 
 	// Otherwise just make whatever view is compatible with the bind flags.
@@ -12159,19 +12107,19 @@ ID3D11View* ClearViewCommand::create_best_view(
 		return _CreateCompatibleView<ID3D11DepthStencilView,
 		       D3D11_DEPTH_STENCIL_VIEW_DESC,
 		       &ID3D11Device::CreateDepthStencilView>
-			       (resource, state, stride, offset, format, buf_src_size, options);
+			       (resource, state, info, options);
 	}
 	if (bind_flags & D3D11_BIND_UNORDERED_ACCESS) {
 		return _CreateCompatibleView<ID3D11UnorderedAccessView,
 		       D3D11_UNORDERED_ACCESS_VIEW_DESC,
 		       &ID3D11Device::CreateUnorderedAccessView>
-			       (resource, state, stride, offset, format, buf_src_size, options);
+			       (resource, state, info, options);
 	}
 	if (bind_flags & D3D11_BIND_RENDER_TARGET) {
 		return _CreateCompatibleView<ID3D11RenderTargetView,
 		       D3D11_RENDER_TARGET_VIEW_DESC,
 		       &ID3D11Device::CreateRenderTargetView>
-			       (resource, state, stride, offset, format, buf_src_size, options);
+			       (resource, state, info, options);
 	}
 	// TODO: In DX 11.1 there is a generic clear routine, so SRVs might work?
 	return NULL;
@@ -12239,23 +12187,21 @@ void ClearViewCommand::clear_unknown_view(ID3D11View *view, CommandListState *st
 
 void ClearViewCommand::run(CommandListState *state)
 {
+	ResourceCopyInfo info;
 	ID3D11Resource *resource = NULL;
 	ID3D11View *view = NULL;
-	UINT stride = 0;
-	UINT offset = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-	UINT buf_src_size = 0;
 
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
-	resource = target.GetResource(state, &view, &stride, &offset, &format, &buf_src_size);
+	resource = target.GetResource(state, &info);
+	view = info.view;
 	if (!resource) {
 		COMMAND_LIST_LOG(state, "  No resource to clear\n");
 		return;
 	}
 
 	if (!view)
-		view = create_best_view(resource, state, stride, offset, format, buf_src_size);
+		view = create_best_view(resource, state, info);
 
 	if (view)
 		clear_unknown_view(view, state);
@@ -12412,7 +12358,7 @@ void ResourceCopyOperation::CopyResourceToTarget(CommandListState* state, Resour
 	if (!PrepareDestination(state, dst_target, &src_info, &cache))
 		return;
 
-	FillInMissingInfo(src.type, src_info.resource, src_info.view, &src_info.stride, &src_info.offset, &src_info.size, &src_info.format);
+	FillInMissingInfo(src.type, src_info.resource, &src_info);
 
 	if (G->analyse_frame)
 		LogBindFlags(state, dst_target, cache, src_info);
@@ -12625,8 +12571,7 @@ void ResourceCopyOperation::BindCopyResult(CommandListState* state, ResourceCopy
 		// Described by the source either way:
 		// a copy's destination resource was created to match it,
 		// and a reference is the source resource.
-		dst_info->view = CreateCompatibleView(&dst_target, dst_info->resource, state,
-				src_info.stride, src_info.offset, src_info.format, src_info.size, options);
+		dst_info->view = CreateCompatibleView(&dst_target, dst_info->resource, state, src_info, options);
 		// Not checking for NULL return as view's are not applicable to
 		// all types. Legitimate failures are logged.
 		*cache.view = dst_info->view;
@@ -12713,8 +12658,7 @@ void ResourceCopyOperation::run(CommandListState *state)
 
 	ResourceCopyInfo src_info;
 
-	src_info.resource = src.GetResource(state, &src_info.view, &src_info.stride, &src_info.offset, &src_info.format, &src_info.size,
-			((options & ResourceCopyOptions::REFERENCE) ? &dst : NULL), &src_info.uav_counter);
+	src_info.resource = src.GetResource(state, &src_info, (options & ResourceCopyOptions::REFERENCE) ? &dst : NULL);
 	
 	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION)
 	{
@@ -13456,7 +13400,9 @@ ID3D11View* SlotRangeCopyOperation::ViewForSlot(CommandListState *state, unsigne
 		cached_views[index] = NULL;
 	}
 
-	ID3D11View *view = CreateCompatibleView(&dst, resource, state, 0, 0, DXGI_FORMAT_UNKNOWN, 0, options);
+	// Nothing to describe the resource with: a range binds whole elements, and a
+	// buffer one would have come with a view of its own above.
+	ID3D11View *view = CreateCompatibleView(&dst, resource, state, ResourceCopyInfo(), options);
 	if (view) {
 		cached_views[index] = view;
 		view->AddRef();
@@ -13548,8 +13494,7 @@ void SlotRangeCopyOperation::BindSlotOp(CommandListState *state, SlotRangeBindin
 	op->deferred = &binding;
 	// Same as ResourceCopyOperation::run() without the log line; its own
 	// lines are nested under the one above:
-	src_info.resource = op->src.GetResource(state, &src_info.view, &src_info.stride, &src_info.offset, &src_info.format, &src_info.size,
-			(options & ResourceCopyOptions::REFERENCE) ? &op->dst : NULL);
+	src_info.resource = op->src.GetResource(state, &src_info, (options & ResourceCopyOptions::REFERENCE) ? &op->dst : NULL);
 	state->extra_indent += 2;
 	op->CopyResourceToResource(state, src_info);
 	state->extra_indent -= 2;
@@ -13578,7 +13523,9 @@ void SlotRangeCopyOperation::BindSlotRef(CommandListState *state, SlotRangeBindi
 		ResourceCopyTarget element;
 		element.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
 		element.SetCustomResource(source);
-		resource = element.GetResource(state, &src_view, NULL, NULL, NULL, NULL, &dst);
+		ResourceCopyInfo element_info;
+		resource = element.GetResource(state, &element_info, &dst);
+		src_view = element_info.view;
 	}
 
 	if (!resource) {
