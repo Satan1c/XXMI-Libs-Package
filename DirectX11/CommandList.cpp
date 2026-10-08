@@ -137,6 +137,20 @@ static inline void profile_command_list_cmd_end(CommandListCommand *cmd, Command
 	}
 }
 
+// Drops every resolve this run has made. Called by anything that binds, because
+// a resolve says what a slot held at the moment it was read: after a bind, a
+// cached one would answer for the resource that was there before it.
+static void invalidate_resolved_resources(CommandListState *state)
+{
+	if (!state)
+		return;
+
+	for (unsigned i = 0; i < state->resolved_count; i++)
+		state->resolved_resources[i].Release();
+
+	state->resolved_count = 0;
+}
+
 static void _RunCommandList(CommandList *command_list, CommandListState *state, bool recursive=true)
 {
 	CommandList::Commands::iterator i;
@@ -2952,6 +2966,13 @@ void RunCustomShaderCommand::run(CommandListState *state)
 
 	mOrigContext1->RSSetViewports(num_viewports, saved_viewports);
 	restore_om_state(mOrigContext1, &om_state);
+
+	// restore_om_state() rebinds the render targets, the depth target and the
+	// UAVs with one OMSetRenderTargetsAndUnorderedAccessViews() of its own, so
+	// it is the one bind in a command list run that does not pass through
+	// SetResource(). A resolve of o#, oD or u# made while this custom shader ran
+	// describes what it bound, not what is bound now:
+	invalidate_resolved_resources(state);
 
 	if (saved_vs)
 		saved_vs->Release();
@@ -9932,20 +9953,6 @@ static ID3D11Resource *get_back_buffer(CommandListState *state, bool fake, const
 		mHackerSwapChain->GetOrigSwapChain1()->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
 
 	return res;
-}
-
-// Drops every resolve this run has made. Called by anything that binds, because
-// a resolve says what a slot held at the moment it was read: after a bind, a
-// cached one would answer for the resource that was there before it.
-static void invalidate_resolved_resources(CommandListState *state)
-{
-	if (!state)
-		return;
-
-	for (unsigned i = 0; i < state->resolved_count; i++)
-		state->resolved_resources[i].Release();
-
-	state->resolved_count = 0;
 }
 
 ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst,
