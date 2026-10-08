@@ -1161,13 +1161,11 @@ public:
 	CommandListVariable* GetPoolVariable(CommandListState* state, bool is_assignment = false);
 	ResourceFilter* GetSlotFilter() { return slot_filter ? slot_filter->ResolveFilter() : nullptr; };
 
-	ID3D11Resource *GetResource(CommandListState *state,
-			ID3D11View **view,
-			UINT *stride,
-			UINT *offset,
-			DXGI_FORMAT *format,
-			UINT *buf_size,
-			ResourceCopyTarget *dst=NULL);
+	// What the target holds right now, with the layout it is bound with filled into info.
+	// The caller owns a reference on the resource returned and on info->view,
+	// and info->resource is left alone.
+	// dst is only used to substantiate a custom resource with the bind flags its destination needs.
+	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
@@ -2094,9 +2092,7 @@ public:
 
 	ClearViewCommand();
 
-	ID3D11View* create_best_view(ID3D11Resource *resource,
-		CommandListState *state, UINT stride,
-		UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	ID3D11View* create_best_view(ID3D11Resource *resource, CommandListState *state, ResourceCopyInfo info);
 	void clear_unknown_view(ID3D11View*, CommandListState *state);
 
 	void run(CommandListState*) override;
