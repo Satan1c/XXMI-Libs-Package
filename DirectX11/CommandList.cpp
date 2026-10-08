@@ -12638,10 +12638,11 @@ static ID3D11View* UsableRefView(ResourceCopyTarget *dst, CommandListState *stat
 //      BindCopyResult()        creates the view the slot needs, then binds
 //       SetOrDeferResource()   binds now, or hands the binding to a batch
 //
-// Two references are in play throughout: the source's, held by whoever resolved
-// it, and the cache's, held by this operation or by the destination custom
-// resource. Nothing in between takes one of its own - SetResource() and the
-// batches AddRef() what they are handed, as they store it.
+// Two references are in play throughout.
+// The source's is held by whoever resolved it;
+// the cache's by this operation, or by the custom resource being copied to.
+// Nothing in between takes one of its own:
+// SetResource() and the batches AddRef() what they are handed.
 void ResourceCopyOperation::CopyResourceToResource(CommandListState* state, const ResourceCopyInfo& src_info)
 {
 	CopyResourceToTarget(state, dst, src_info);
@@ -12671,9 +12672,9 @@ void ResourceCopyOperation::CopyResourceToTarget(CommandListState* state, Resour
 	if (G->analyse_frame)
 		LogBindFlags(state, dst_target, cache, src_info);
 
-	// What the destination slot ends up bound to. The resource, the view and
-	// the size are its own; the rest describes both ends of the copy, so it is
-	// taken from the source once this stage has refined it:
+	// What the destination slot ends up bound to.
+	// The resource, the view and the size are its own;
+	// the rest is taken from the source, once the stage below has refined it:
 	ResourceCopyInfo dst_info;
 	bool have_destination = true;
 
@@ -12687,9 +12688,9 @@ void ResourceCopyOperation::CopyResourceToTarget(CommandListState* state, Resour
 		BindCopyResult(state, dst_target, src_info, cache, &dst_info);
 	}
 
-	// A cached view holds a reference on its resource until the next run, which
-	// the back buffer cannot allow - that would block ResizeBuffers(). The
-	// no_view_cache option asks for the same by hand:
+	// A cached view holds a reference on its resource until the next run.
+	// The back buffer cannot allow that - it would block ResizeBuffers().
+	// The no_view_cache option asks for the same by hand:
 	if ((options & ResourceCopyOptions::NO_VIEW_CACHE || src.forbid_view_cache) && *cache.view)
 	{
 		(*cache.view)->Release();
@@ -12697,9 +12698,9 @@ void ResourceCopyOperation::CopyResourceToTarget(CommandListState* state, Resour
 	}
 }
 
-// Settles where this copy caches what it creates, and everything about the
-// destination that has to be known before the source is read. False means the
-// copy must not go ahead at all.
+// Settles where this copy caches what it creates,
+// and everything else about the destination that has to be known up front.
+// False means the copy must not go ahead at all.
 bool ResourceCopyOperation::PrepareDestination(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, ResourceCopyCache* cache)
 {
 	cache->resource = &cached_resource;
@@ -12727,10 +12728,10 @@ bool ResourceCopyOperation::PrepareDestination(CommandListState* state, Resource
 
 	custom_resource->OverrideOutOfBandInfo(&src_info->format, &src_info->stride);
 
-	// Recorded for ->SourceStride, which reports the layout the data was
-	// written with rather than the destination's own. A custom resource source
-	// passes on the stride it recorded in turn, so that a chain of copies still
-	// reports the stride the data started out with:
+	// Recorded for ->SourceStride:
+	// the stride the data was written with, rather than the destination's own.
+	// A custom resource source passes on the stride it recorded in turn,
+	// so that a chain of copies still reports the stride it started out with:
 	if (src.type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
 		CustomResource* src_custom_resource = src.GetCustomResource(state);
 		custom_resource->source_stride = src_custom_resource->source_stride > 0 ? src_custom_resource->source_stride : src_info->stride;
@@ -12741,9 +12742,8 @@ bool ResourceCopyOperation::PrepareDestination(CommandListState* state, Resource
 	return true;
 }
 
-// max_copies_per_frame throttles a copy that is too expensive to repeat for
-// every shader that asks for it, counting per frame on the destination itself
-// so that all of its copies share the one budget.
+// max_copies_per_frame throttles a copy that is too expensive to repeat.
+// The count lives on the destination, so all of its copies share one budget.
 bool ResourceCopyOperation::WithinCopyBudget(CommandListState* state, CustomResource* custom_resource)
 {
 	if (!custom_resource->max_copies_per_frame)
@@ -12763,14 +12763,14 @@ bool ResourceCopyOperation::WithinCopyBudget(CommandListState* state, CustomReso
 	return false;
 }
 
-// Frame analysis only: a reference that the destination's slot cannot accept is
-// the usual reason for the view creation below to fail, and the bind flags are
-// what decides that.
+// Frame analysis only:
+// view creation below usually fails on a missing bind flag,
+// so log both ends of the copy before trying it.
 void ResourceCopyOperation::LogBindFlags(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyCache& cache, const ResourceCopyInfo& src_info)
 {
 	UINT src_bind_flags = get_resource_bind_flags(src_info.resource);
-	// Reuse the already resolved custom resource to avoid evaluating
-	// a dynamic pool index twice:
+	// Reuse the already resolved custom resource,
+	// to avoid evaluating a dynamic pool index twice:
 	D3D11_BIND_FLAG dst_bind_flags = cache.custom_resource ? cache.custom_resource->bind_flags : dst_target.BindFlags(state);
 
 	COMMAND_LIST_LOG(state, "  src bind_flags=0x%03x [%S] dst bind_flags=0x%03x [%S]\n",
@@ -12781,8 +12781,9 @@ void ResourceCopyOperation::LogBindFlags(CommandListState* state, ResourceCopyTa
 		COMMAND_LIST_LOG(state, "  WARNING: referenced resource is missing bind flags required by destination, view creation will fail\n");
 }
 
-// Copies the source into a resource of the destination's own, created or resized
-// to suit it first. False if there is no such resource to bind.
+// Copies the source into a resource of the destination's own,
+// created or resized to suit it first.
+// False if there is no such resource to bind.
 bool ResourceCopyOperation::CopyToCachedResource(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info)
 {
 	RecreateCompatibleResource(&ini_line, &src, &dst_target, src_info->resource, cache.resource, cache.pool, src_info->view, cache.view,
@@ -12808,15 +12809,16 @@ bool ResourceCopyOperation::CopyToCachedResource(CommandListState* state, Resour
 		Profiling::msaa_resolutions++;
 		ResolveMSAA(dst_info->resource, src_info->resource, state);
 	} else if (dst_info->size) {
-		// A destination size of its own means only part of the source fits, so
-		// the copy is of that region alone:
+		// A destination size of its own means only part of the source fits,
+		// so the copy is of that region alone:
 		COMMAND_LIST_LOG(state, "  performing region copy (src_stride=%d src_offset=%d src_size=%d dst_size=%d)\n",
 			src_info->stride, src_info->offset, src_info->size, dst_info->size);
 		Profiling::buffer_region_copies++;
 		if (G->cache_resource_data != DataCacheBindFlags::INVALID && cache.custom_resource)
 			cache.custom_resource->SetHandleInfo(src_info->resource, src_info->offset, dst_info->size);
-		// Clears src_info's offset: the region lands at the start of the
-		// destination, so nothing downstream may offset it a second time.
+		// Clears src_info's offset:
+		// the region lands at the start of the destination,
+		// so nothing downstream may apply it a second time.
 		SpecialCopyBufferRegion(dst_info->resource, src_info->resource,
 				state, src_info->stride, &src_info->offset,
 				src_info->size, dst_info->size);
@@ -12832,17 +12834,19 @@ bool ResourceCopyOperation::CopyToCachedResource(CommandListState* state, Resour
 	return true;
 }
 
-// A "ref" copy binds the source resource itself. Nothing is copied and no
-// resource is created - only, below, a view of the kind the destination's slot
-// takes, if the source did not come with a usable one.
+// A "ref" copy binds the source resource itself.
+// Nothing is copied and no resource is created.
+// At most it needs a view of the kind the destination's slot takes,
+// which BindCopyResult() creates when the source has none to reuse.
 void ResourceCopyOperation::ReferenceSource(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info)
 {
 	COMMAND_LIST_LOG(state, "  copying by reference\n");
 	Profiling::resource_reference_copies++;
 
 	// A ->Region($offset, $size) source names the part of the resource to bind,
-	// and the destination's size is that region's. run() has already applied the
-	// offset to src_info, but a batch calls in without going through it:
+	// and the destination's size is that region's.
+	// run() has already applied the offset to src_info,
+	// but a batch calls in without going through it:
 	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION)
 	{
 		src_info->offset = (UINT)src.member_args[0].GetValue(state);
@@ -12855,8 +12859,9 @@ void ResourceCopyOperation::ReferenceSource(CommandListState* state, ResourceCop
 	dst_info->resource = src_info->resource;
 	dst_info->view = UsableRefView(&dst_target, state, src_info->view, dst_info->resource);
 
-	// Failing that, a view this operation cached earlier will do, as long as it
-	// is still a view of this resource - the reference may have moved on:
+	// Failing that, a view this operation cached earlier will do,
+	// but only if it is still a view of this resource:
+	// the reference it was created for may have moved on.
 	if (!dst_info->view && *cache.view) {
 		if (ViewMatchesResource(*cache.view, dst_info->resource)) {
 			dst_info->view = *cache.view;
@@ -12872,8 +12877,9 @@ void ResourceCopyOperation::ReferenceSource(CommandListState* state, ResourceCop
 void ResourceCopyOperation::BindCopyResult(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyInfo& src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info)
 {
 	if (!dst_info->view) {
-		// Described by the source either way: a copy's destination resource was
-		// created to match it, and a reference is the source resource.
+		// Described by the source either way:
+		// a copy's destination resource was created to match it,
+		// and a reference is the source resource.
 		dst_info->view = CreateCompatibleView(&dst_target, dst_info->resource, state,
 				src_info.stride, src_info.offset, src_info.format, src_info.size, options);
 		// Not checking for NULL return as view's are not applicable to
@@ -12881,7 +12887,7 @@ void ResourceCopyOperation::BindCopyResult(CommandListState* state, ResourceCopy
 		*cache.view = dst_info->view;
 	}
 
-	// SetResource supports branching to SetConstantBuffers1 when offset and buf_dst_size are specified.
+	// SetResource supports branching to SetConstantBuffers1 when offset and size are specified.
 	// 
 	// For `ref` copy to DST ConstantBuffer with `->Region` specified for SRC, we should use SetConstantBuffers1.
 	//   `cs-cb0 = ref vs-cb0->Region($offset, $size)`
@@ -12929,8 +12935,8 @@ void ResourceCopyOperation::SetOrDeferResource(CommandListState* state, Resource
 		return;
 	}
 
-	// Inside a batch the slot is set once at the end of the run, so the binding
-	// is handed back with references of its own for the batch to hold:
+	// Inside a batch the slot is set once at the end of the run,
+	// so the binding is handed back with references of its own for the batch:
 	if (binding.resource)
 		binding.resource->AddRef();
 	if (binding.view)
@@ -12946,8 +12952,8 @@ void ResourceCopyOperation::RunWithSource(CommandListState *state, ID3D11Resourc
 {
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
-	// Same as run() for a pipeline slot source, which GetResource() returns
-	// without stride/offset/format/size:
+	// Same as run() for a pipeline slot source:
+	// GetResource() returns it without stride/offset/format/size.
 	CopyResourceToResource(state, ResourceCopyInfo(src_resource, src_view));
 }
 
