@@ -27,6 +27,7 @@ class HackerDevice;
 class HackerContext;
 enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
+struct ResolvedResource;
 
 struct InputLayoutElementOverride {
 	struct Match {
@@ -83,6 +84,14 @@ public:
 	ID3D11ShaderResourceView *cursor_mask_view;
 	ID3D11ShaderResourceView *cursor_color_view;
 	RECT window_rect;
+
+	// Resources resolved by a property read while an expression is being
+	// evaluated, in storage ResolvedResourceScope owns for the length of that
+	// evaluation. Null in between, which is what stops a resolve outliving the
+	// one place where nothing can rebind what it read.
+	ResolvedResource *resolved_resources;
+	unsigned resolved_count;
+	unsigned resolved_capacity;
 
 	int recursion;
 	int extra_indent;
@@ -1045,6 +1054,71 @@ struct ResourceCopyInfo {
 	}
 };
 
+// D3D11 keeps a resource's description behind a GetDesc() of its own per
+// dimension, with no field in common between the four. This is whichever one
+// applies, in the shape the <target>->Property accessors ask about.
+struct ResourceDescInfo {
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	UINT width = 0;       // ByteWidth for a buffer
+	UINT height = 0;      // 1 for a 1D texture, 0 for a buffer
+	UINT array_size = 0;  // 1D and 2D textures only
+	UINT mip_levels = 0;  // Textures only
+	UINT stride = 0;      // StructureByteStride, buffers only
+	UINT bind_flags = 0;
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // Buffers have none
+
+	bool is_buffer() const { return dimension == D3D11_RESOURCE_DIMENSION_BUFFER; }
+	// A 3D texture has depth where the other two have an array size,
+	// so it is not one of these:
+	bool has_array() const
+	{
+		return dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D
+			|| dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+	}
+	bool is_texture() const
+	{
+		return has_array() || dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+	}
+};
+
+// What two property reads have to agree on to be reading the same resource.
+// Not the ResourceCopyTarget itself: every operand of an expression holds its
+// own copy of the target it reads, so `ps-t0->Width` and `ps-t0->Height` arrive
+// as two targets naming one slot. Every field is a plain member of the target,
+// so building a key resolves nothing and costs nothing.
+struct ResolvedResourceKey {
+	ResourceCopyTargetType type = ResourceCopyTargetType::INVALID;
+	wchar_t shader_type = L'\0';
+	unsigned slot = 0;
+	// A custom resource named directly, or indexed statically (PoolFoo[0]):
+	const CustomResource *custom_resource = nullptr;
+	// A bare pool, which answers for its template, and tells two of them apart:
+	const CustomResourcePool *pool = nullptr;
+
+	bool operator==(const ResolvedResourceKey &other) const
+	{
+		return type == other.type && shader_type == other.shader_type
+			&& slot == other.slot && custom_resource == other.custom_resource
+			&& pool == other.pool;
+	}
+};
+
+// A target resolved to what it holds, with the description read off it at most
+// once however many properties ask. Owns the references it resolved.
+struct ResolvedResource {
+	ResolvedResourceKey key;
+	ResourceCopyInfo info;
+
+	// Only once info.resource is known to be there - a target with nothing
+	// bound resolves to no resource, and has no description to read:
+	const ResourceDescInfo &Description();
+	void Release();
+
+private:
+	ResourceDescInfo desc;
+	bool described = false;
+};
+
 class ResourceCopyTarget : public SyntaxTarget
 {
 public:
@@ -1130,6 +1204,7 @@ private:
 	// first; BufferRegionOffset() is where in a buffer slot the contents start.
 	template <typename ReadProperty>
 	float ResourceProperty(CommandListState *state, ReadProperty read);
+	ResolvedResource *ResolveForProperty(CommandListState *state, ResolvedResource *local);
 	bool PropertyCustomResource(CommandListState *state, CustomResource **custom_resource);
 	UINT BufferRegionOffset(CommandListState *state, const ResourceCopyInfo &info);
 
@@ -1700,6 +1775,21 @@ public:
 	float evaluate(CommandListState *state, HackerDevice *device=NULL) override;
 	bool static_evaluate(float *ret, HackerDevice *device=NULL, bool evaluate_variables=false) override;
 	bool optimise(HackerDevice *device, std::shared_ptr<CommandListEvaluatable> *replacement) override;
+};
+
+// Holds the resolves made while one expression is evaluated, so that every
+// property read of one resource shares a single resolve of it.
+class ResolvedResourceScope {
+public:
+	explicit ResolvedResourceScope(CommandListState *state);
+	~ResolvedResourceScope();
+
+private:
+	// Enough for the expressions that read more than one property of a thing:
+	// an aspect ratio, a stride beside a size. A fifth resource in one
+	// expression resolves on its own, as all of them did before.
+	ResolvedResource resolved[4];
+	CommandListState *owner; // Null unless this scope is the one that opened it
 };
 
 class CommandListExpression {
