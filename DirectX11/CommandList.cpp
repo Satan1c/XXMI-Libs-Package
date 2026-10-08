@@ -10140,15 +10140,127 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	return NULL;
 }
 
+// Binds one stream output slot, which means rebinding all four: the offset the
+// shader starts writing at goes with the buffer.
+static void set_stream_output_slot(ID3D11DeviceContext1 *context, unsigned slot, ID3D11Buffer *buf, UINT offset)
+{
+	ID3D11Buffer *so_bufs[D3D11_SO_STREAM_COUNT];
+	UINT so_offsets[D3D11_SO_STREAM_COUNT] = {};
+
+	context->SOGetTargets(D3D11_SO_STREAM_COUNT, so_bufs);
+	if (so_bufs[slot])
+		so_bufs[slot]->Release();
+	so_bufs[slot] = buf;
+
+	// An offset has the shader write into part of the buffer,
+	// not from the start of it,
+	// so a draw call can re-skin one object out of a shared mesh:
+	//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
+	//
+	// The slots this is not binding keep the offset 0,
+	// which is what they were given when offsets were NULL:
+	// SOGetTargets() does not report the offsets they were bound at,
+	// so there is nothing to put back.
+	//
+	// XXX: (UINT)-1 for those slots may well be better.
+	// It means "append": the stage carries on writing,
+	// instead of starting over and overwriting what is there.
+	// That is closer to leaving an unmentioned slot alone,
+	// but it changes their behaviour,
+	// so it wants testing in a game that binds several targets.
+	so_offsets[slot] = offset;
+	context->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
+	release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
+}
+
+// Binds one render target slot. D3D11 sets the whole array and the depth target
+// in one call, so the rest is read back to be put straight back.
+static void set_render_target_slot(ID3D11DeviceContext1 *context, unsigned slot, ID3D11RenderTargetView *rtv)
+{
+	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+	ID3D11DepthStencilView *depth_view = NULL;
+
+	context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, &depth_view);
+
+	if (render_view[slot])
+		render_view[slot]->Release();
+	render_view[slot] = rtv;
+
+	context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
+
+	release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, slot);
+	if (depth_view)
+		depth_view->Release();
+}
+
+// The other half of the same call: the depth target, with the render targets
+// read back and put straight back.
+static void set_depth_target(ID3D11DeviceContext1 *context, ID3D11DepthStencilView *dsv)
+{
+	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+	ID3D11DepthStencilView *depth_view = NULL;
+
+	context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, &depth_view);
+
+	if (depth_view)
+		depth_view->Release();
+
+	context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, dsv);
+
+	// Only the depth view was replaced, and it is the caller's,
+	// so no slot of this array is kept:
+	release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+}
+
+// A custom resource destination is also the cache a copy keeps its resource in,
+// so what is stored here is what the next run binds, metadata included.
+void ResourceCopyTarget::StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding)
+{
+	CustomResource *custom_resource = GetCustomResource(state, true);
+
+	custom_resource->stride = binding.stride;
+	custom_resource->offset = binding.offset;
+	custom_resource->format = binding.format;
+	custom_resource->buf_size = binding.size;
+
+	if (binding.resource == NULL && binding.view == NULL) {
+		// Optimisation to allow the resource to be set to null
+		// without throwing away the cache so we don't
+		// endlessly create & destroy temporary resources.
+		custom_resource->is_null = true;
+		return;
+	}
+	custom_resource->is_null = false;
+
+	// If we are passed our own resource (might happen if the
+	// resource is used directly in the run() function, or if
+	// someone assigned a resource to itself), don't needlessly
+	// AddRef() and Release(), and definitely don't Release()
+	// before AddRef()
+	if (custom_resource->view != binding.view) {
+		if (custom_resource->view)
+			custom_resource->view->Release();
+		custom_resource->view = binding.view;
+		if (custom_resource->view)
+			custom_resource->view->AddRef();
+	}
+
+	if (custom_resource->resource != binding.resource) {
+		if (custom_resource->resource)
+			custom_resource->resource->Release();
+		custom_resource->resource = binding.resource;
+		// Which device created it, for expire() to compare against:
+		custom_resource->device = state->mOrigDevice1;
+		if (custom_resource->resource)
+			custom_resource->resource->AddRef();
+	}
+}
+
 void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopyInfo &binding)
 {
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
 	ID3D11Buffer *buf = NULL;
-	ID3D11Buffer *so_bufs[D3D11_SO_STREAM_COUNT];
-	UINT so_offsets[D3D11_SO_STREAM_COUNT] = {};
 	ID3D11ShaderResourceView *resource_view = NULL;
-	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-	ID3D11DepthStencilView *depth_view = NULL;
 	ID3D11UnorderedAccessView *unordered_view = NULL;
 	// The vertex buffer and constant buffer region calls take these by address,
 	// so they need somewhere of their own to live:
@@ -10203,61 +10315,15 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		break;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		buf = (ID3D11Buffer*)binding.resource;
-		mOrigContext1->SOGetTargets(D3D11_SO_STREAM_COUNT, so_bufs);
-		if (so_bufs[slot])
-			so_bufs[slot]->Release();
-		so_bufs[slot] = buf;
-
-		// An offset has the shader write into part of the buffer,
-		// not from the start of it,
-		// so a draw call can re-skin one object out of a shared mesh:
-		//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
-		//
-		// The slots this is not binding keep the offset 0,
-		// which is what they were given when offsets were NULL:
-		// SOGetTargets() does not report the offsets they were bound at,
-		// so there is nothing to put back.
-		//
-		// XXX: (UINT)-1 for those slots may well be better.
-		// It means "append": the stage carries on writing,
-		// instead of starting over and overwriting what is there.
-		// That is closer to leaving an unmentioned slot alone,
-		// but it changes their behaviour,
-		// so it wants testing in a game that binds several targets.
-		so_offsets[slot] = binding.offset;
-		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
-		release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
-
+		set_stream_output_slot(mOrigContext1, slot, (ID3D11Buffer*)binding.resource, binding.offset);
 		break;
 
 	case ResourceCopyTargetType::RENDER_TARGET:
-		mOrigContext1->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, &depth_view);
-
-		if (render_view[slot])
-			render_view[slot]->Release();
-		render_view[slot] = (ID3D11RenderTargetView*)binding.view;
-
-		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
-
-		release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, slot);
-		if (depth_view)
-			depth_view->Release();
-
+		set_render_target_slot(mOrigContext1, slot, (ID3D11RenderTargetView*)binding.view);
 		break;
 
 	case ResourceCopyTargetType::DEPTH_STENCIL_TARGET:
-		mOrigContext1->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, &depth_view);
-
-		if (depth_view)
-			depth_view->Release();
-		depth_view = (ID3D11DepthStencilView*)binding.view;
-
-		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
-
-		// Only the depth view was replaced, and it is the caller's,
-		// so no slot of this array is kept:
-		release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+		set_depth_target(mOrigContext1, (ID3D11DepthStencilView*)binding.view);
 		break;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
@@ -10266,46 +10332,9 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		break;
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
-	{
-		CustomResource* custom_resource = GetCustomResource(state, true);
-
-		custom_resource->stride = binding.stride;
-		custom_resource->offset = binding.offset;
-		custom_resource->format = binding.format;
-		custom_resource->buf_size = binding.size;
-
-		if (binding.resource == NULL && binding.view == NULL) {
-			// Optimisation to allow the resource to be set to null
-			// without throwing away the cache so we don't
-			// endlessly create & destroy temporary resources.
-			custom_resource->is_null = true;
-			return;
-		}
-		custom_resource->is_null = false;
-
-		// If we are passed our own resource (might happen if the
-		// resource is used directly in the run() function, or if
-		// someone assigned a resource to itself), don't needlessly
-		// AddRef() and Release(), and definitely don't Release()
-		// before AddRef()
-		if (custom_resource->view != binding.view) {
-			if (custom_resource->view)
-				custom_resource->view->Release();
-			custom_resource->view = binding.view;
-			if (custom_resource->view)
-				custom_resource->view->AddRef();
-		}
-
-		if (custom_resource->resource != binding.resource) {
-			if (custom_resource->resource)
-				custom_resource->resource->Release();
-			custom_resource->resource = binding.resource;
-			custom_resource->device = state->mOrigDevice1;
-			if (custom_resource->resource)
-				custom_resource->resource->AddRef();
-		}
+		StoreInCustomResource(state, binding);
 		break;
-	}
+
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
 			return state->this_target->SetResource(state, binding);

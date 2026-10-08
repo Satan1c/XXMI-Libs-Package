@@ -1102,6 +1102,7 @@ public:
 			ResourceCopyTarget *dst=NULL,
 			UINT *uav_counter=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
+	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
 	void FindTextureOverrides(
 			CommandListState *state,
