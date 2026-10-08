@@ -1188,12 +1188,13 @@ enum class BatchDirection {
 	Fetch,
 };
 
-// A resource and how to read it: the view it came from, plus the buffer layout
-// that neither of them always knows on its own - a structured buffer's stride
-// comes from the resource, a typed buffer's from the view's format, a constant
-// buffer's region from the call that bound it. The copy pipeline passes this
-// around as one value because every stage either forwards it untouched or
-// fills in a field that was still unknown.
+// A resource and how to read it: the view it came from,
+// plus the buffer layout that neither of them always knows on its own.
+// A structured buffer's stride comes from the resource,
+// a typed buffer's from the view's format,
+// a constant buffer's region from the call that bound it.
+// The copy pipeline passes all of this around as one value:
+// every stage either forwards it untouched, or fills in what was still unknown.
 struct ResourceCopyInfo {
 	ID3D11Resource *resource = nullptr;
 	ID3D11View *view = nullptr;
@@ -1209,8 +1210,8 @@ struct ResourceCopyInfo {
 		resource(resource), view(view)
 	{}
 
-	// Adopts the layout (and UAV count) the other side of the copy is
-	// described by, keeping the resource, view and size of this one:
+	// Adopts the layout, and the UAV count, of the other side of the copy;
+	// keeps the resource, view and size of this one:
 	void TakeLayoutFrom(const ResourceCopyInfo &other)
 	{
 		stride = other.stride;
@@ -1220,11 +1221,10 @@ struct ResourceCopyInfo {
 	}
 };
 
-// Where a copy keeps the resource and view it creates between runs. Normally
-// they live in the ResourceCopyOperation, so each ini line gets its own; a copy
-// to a custom resource caches them on the custom resource instead, so that
-// several lines copying to the same destination share one resource rather than
-// carrying one each.
+// Where a copy keeps the resource and view it creates between runs.
+// Normally they live in the ResourceCopyOperation, so each line gets its own.
+// A copy to a custom resource caches them on the custom resource instead,
+// so that several lines copying to the same destination share one resource.
 struct ResourceCopyCache {
 	CustomResource *custom_resource = nullptr; // Only a custom resource destination has one
 	ID3D11Resource **resource = nullptr;
