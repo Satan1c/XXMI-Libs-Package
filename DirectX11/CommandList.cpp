@@ -9804,6 +9804,128 @@ static void release_slots(T **array, unsigned count, unsigned keep = UINT_MAX)
 	}
 }
 
+#pragma region PipelineStageCalls
+
+// D3D11 splits most of the pipeline per shader stage, as six near-identical
+// methods where one with a stage argument would have done. Every slot read and
+// bind in the fork goes through the wrappers below, so that a stage is spelled
+// out once instead of in each caller: a single slot passes a count of 1, and the
+// slot range batches pass the whole range, hence the names.
+//
+// A stage with no slots of that kind binds and reads nothing. Callers either
+// rejected it at parse time, or go on to find a null binding, which they handle
+// anyway.
+
+static void GetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11Buffer **buffers, UINT *cb_offsets, UINT *cb_sizes)
+{
+	switch (shader_type) {
+		case L'v': context->VSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+		case L'h': context->HSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+		case L'd': context->DSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+		case L'g': context->GSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+		case L'p': context->PSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+		case L'c': context->CSGetConstantBuffers1(first, count, buffers, cb_offsets, cb_sizes); break;
+	}
+}
+
+static void SetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11Buffer *const *buffers)
+{
+	switch (shader_type) {
+		case L'v': context->VSSetConstantBuffers(first, count, buffers); break;
+		case L'h': context->HSSetConstantBuffers(first, count, buffers); break;
+		case L'd': context->DSSetConstantBuffers(first, count, buffers); break;
+		case L'g': context->GSSetConstantBuffers(first, count, buffers); break;
+		case L'p': context->PSSetConstantBuffers(first, count, buffers); break;
+		case L'c': context->CSSetConstantBuffers(first, count, buffers); break;
+	}
+}
+
+// Binds a window of each buffer rather than all of it, in constants of 16 bytes.
+// A driver may refuse to support constant buffer offsetting, so this is only
+// used where a region was actually asked for.
+static void SetConstantBufferRegionsBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11Buffer *const *buffers, const UINT *cb_first, const UINT *cb_counts)
+{
+	switch (shader_type) {
+		case L'v': context->VSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		case L'h': context->HSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		case L'd': context->DSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		case L'g': context->GSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		case L'p': context->PSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		case L'c': context->CSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+	}
+}
+
+static void GetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView **views)
+{
+	switch (shader_type) {
+		case L'v': context->VSGetShaderResources(first, count, views); break;
+		case L'h': context->HSGetShaderResources(first, count, views); break;
+		case L'd': context->DSGetShaderResources(first, count, views); break;
+		case L'g': context->GSGetShaderResources(first, count, views); break;
+		case L'p': context->PSGetShaderResources(first, count, views); break;
+		case L'c': context->CSGetShaderResources(first, count, views); break;
+	}
+}
+
+static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView *const *views)
+{
+	switch (shader_type) {
+		case L'v': context->VSSetShaderResources(first, count, views); break;
+		case L'h': context->HSSetShaderResources(first, count, views); break;
+		case L'd': context->DSSetShaderResources(first, count, views); break;
+		case L'g': context->GSSetShaderResources(first, count, views); break;
+		case L'p': context->PSSetShaderResources(first, count, views); break;
+		case L'c': context->CSSetShaderResources(first, count, views); break;
+	}
+}
+
+// Only the pixel and compute stages have UAV slots, and the pixel ones are part
+// of the output merger rather than of the stage, which is why they come and go
+// with the render targets.
+static void GetUnorderedAccessViewsBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11UnorderedAccessView **views)
+{
+	switch (shader_type) {
+		case L'c':
+			context->CSGetUnorderedAccessViews(first, count, views);
+			break;
+		case L'p':
+			// XXX: Not clear if the start slot is ok like this from the docs?
+			// Particularly, what happens if we retrieve a subsequent UAV?
+			context->OMGetRenderTargetsAndUnorderedAccessViews(0, NULL, NULL, first, count, views);
+			break;
+	}
+}
+
+static void SetUnorderedAccessViewsBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11UnorderedAccessView *const *views, const UINT *uav_counters)
+{
+	switch (shader_type) {
+		case L'c':
+			context->CSSetUnorderedAccessViews(first, count, views, uav_counters);
+			break;
+		case L'p':
+			// XXX: UNTESTED CODE PATH - unlike the compute shader case
+			// above, which is used in practice.
+			//
+			// Other UAV slots keep their bindings, but render targets
+			// do not: with NumRTVs = KEEP, D3D11 still unbinds every
+			// render target in a slot >= UAVStartSlot, along with
+			// anything (render target, shader resource, stream output
+			// target) sharing a subresource with these views. Binding
+			// ps-u2 therefore drops o2 and above.
+			context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,
+				NULL, NULL, first, count, views, uav_counters);
+			break;
+	}
+}
+
+#pragma endregion PipelineStageCalls
+
+
 ID3D11Resource *ResourceCopyTarget::GetResource(
 		CommandListState *state,
 		ID3D11View **view,   // Used by textures, render targets, depth/stencil buffers & UAVs
@@ -9835,29 +9957,8 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 	{
-		switch (shader_type) {
-		case L'v':
-			mOrigContext1->VSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		case L'h':
-			mOrigContext1->HSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		case L'd':
-			mOrigContext1->DSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		case L'g':
-			mOrigContext1->GSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		case L'p':
-			mOrigContext1->PSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		case L'c':
-			mOrigContext1->CSGetConstantBuffers1(slot, 1, &buf, offset, buf_size);
-			break;
-		default:
-			// Should not happen
-			return NULL;
-		}
+		GetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf, offset, buf_size);
+
 		// Derive data offset in bytes from FirstConstant, where each constant is 16 bytes long (4 * 32-bit components).
 		// FirstConstant specifies index of the first constant of CB region that is currently visible to shaders (bound via VSSetConstantBuffers1).
 		// Runtime sets *FirstConstant (pointer!) to NULL if it is not defined in VSSetConstantBuffers(1) call used to bind CB.
@@ -9872,29 +9973,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		return buf;
 	}
 	case ResourceCopyTargetType::SHADER_RESOURCE:
-		switch(shader_type) {
-		case L'v':
-			mOrigContext1->VSGetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'h':
-			mOrigContext1->HSGetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'd':
-			mOrigContext1->DSGetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'g':
-			mOrigContext1->GSGetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'p':
-			mOrigContext1->PSGetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'c':
-			mOrigContext1->CSGetShaderResources(slot, 1, &resource_view);
-			break;
-		default:
-			// Should not happen
-			return NULL;
-		}
+		GetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
 
 		if (!resource_view)
 			return NULL;
@@ -9965,19 +10044,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		return res;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
-		switch(shader_type) {
-		case L'p':
-			// XXX: Not clear if the start slot is ok like this from the docs?
-			// Particularly, what happens if we retrieve a subsequent UAV?
-			mOrigContext1->OMGetRenderTargetsAndUnorderedAccessViews(0, NULL, NULL, slot, 1, &unordered_view);
-			break;
-		case L'c':
-			mOrigContext1->CSGetUnorderedAccessViews(slot, 1, &unordered_view);
-			break;
-		default:
-			// Should not happen
-			return NULL;
-		}
+		GetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view);
 
 		if (!unordered_view)
 			return NULL;
@@ -10143,89 +10210,23 @@ void ResourceCopyTarget::SetResource(
 		if (!buf_size) {
 			if (offset > 0)
 				LogOverlayW(LOG_DIRE, L"BUG: SetResource called with offset=%d but buf_size=0 for CONSTANT_BUFFER, falling back to plugging the entire buffer\n", offset);
-			switch (shader_type) {
-				case L'v':
-					mOrigContext1->VSSetConstantBuffers(slot, 1, &buf);
-					return;
-				case L'h':
-					mOrigContext1->HSSetConstantBuffers(slot, 1, &buf);
-					return;
-				case L'd':
-					mOrigContext1->DSSetConstantBuffers(slot, 1, &buf);
-					return;
-				case L'g':
-					mOrigContext1->GSSetConstantBuffers(slot, 1, &buf);
-					return;
-				case L'p':
-					mOrigContext1->PSSetConstantBuffers(slot, 1, &buf);
-					return;
-				case L'c':
-					mOrigContext1->CSSetConstantBuffers(slot, 1, &buf);
-					return;
-			default:
-				// Should not happen
-				return;
-			}
-		} else {
-			// Derive FirstConstant from data offset in bytes, where each constant is 16 bytes long (4 * 32-bit components).
-			// FirstConstant specifies index of the first constant of CB region that is currently visible to shaders (bound via VSSetConstantBuffers1).
-			if (offset)
-				offset /= 16;
-			// Derive NumConstants from data size in bytes, where each constant is 16 bytes long (4 * 32-bit components).
-			// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
-			if (buf_size)
-				buf_size /= 16;
-			switch (shader_type) {
-				case L'v':
-					mOrigContext1->VSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				case L'h':
-					mOrigContext1->HSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				case L'd':
-					mOrigContext1->DSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				case L'g':
-					mOrigContext1->GSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				case L'p':
-					mOrigContext1->PSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				case L'c':
-					mOrigContext1->CSSetConstantBuffers1(slot, 1, &buf, &offset, &buf_size);
-					return;
-				default:
-					// Should not happen
-					return;
-			}
+			SetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf);
+			return;
 		}
-		break;
+
+		// Derive FirstConstant from data offset in bytes, where each constant is 16 bytes long (4 * 32-bit components).
+		// FirstConstant specifies index of the first constant of CB region that is currently visible to shaders (bound via VSSetConstantBuffers1).
+		offset /= 16;
+		// Derive NumConstants from data size in bytes, where each constant is 16 bytes long (4 * 32-bit components).
+		// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
+		buf_size /= 16;
+
+		SetConstantBufferRegionsBatch(mOrigContext1, shader_type, slot, 1, &buf, &offset, &buf_size);
+		return;
 
 	case ResourceCopyTargetType::SHADER_RESOURCE:
 		resource_view = (ID3D11ShaderResourceView*)view;
-		switch(shader_type) {
-		case L'v':
-			mOrigContext1->VSSetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'h':
-			mOrigContext1->HSSetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'd':
-			mOrigContext1->DSSetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'g':
-			mOrigContext1->GSSetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'p':
-			mOrigContext1->PSSetShaderResources(slot, 1, &resource_view);
-			break;
-		case L'c':
-			mOrigContext1->CSSetShaderResources(slot, 1, &resource_view);
-			break;
-		default:
-			// Should not happen
-			return;
-		}
+		SetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
 		break;
 
 	// TODO: case ResourceCopyTargetType::SAMPLER: // Not an ID3D11Resource, need to think about this one
@@ -10301,27 +10302,7 @@ void ResourceCopyTarget::SetResource(
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		unordered_view = (ID3D11UnorderedAccessView*)view;
-		switch(shader_type) {
-		case L'p':
-			// XXX: UNTESTED CODE PATH - unlike the compute shader case
-			// below, which is used in practice.
-			//
-			// Other UAV slots keep their bindings, but render targets
-			// do not: with NumRTVs = KEEP, D3D11 still unbinds every
-			// render target in a slot >= UAVStartSlot, along with
-			// anything (render target, shader resource, stream output
-			// target) sharing a subresource with this view. Binding
-			// ps-u2 therefore drops o2 and above.
-			mOrigContext1->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,
-				NULL, NULL, slot, 1, &unordered_view, &uav_counter);
-			return;
-		case L'c':
-			mOrigContext1->CSSetUnorderedAccessViews(slot, 1, &unordered_view, &uav_counter);
-			return;
-		default:
-			// Should not happen
-			return;
-		}
+		SetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view, &uav_counter);
 		break;
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
@@ -12775,30 +12756,6 @@ void ResourceCopyOperation::run(CommandListState *state)
 
 #pragma region ShaderResourceBatches
 
-static void GetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView **views)
-{
-	switch (shader_type) {
-		case L'v': context->VSGetShaderResources(first, count, views); break;
-		case L'h': context->HSGetShaderResources(first, count, views); break;
-		case L'd': context->DSGetShaderResources(first, count, views); break;
-		case L'g': context->GSGetShaderResources(first, count, views); break;
-		case L'p': context->PSGetShaderResources(first, count, views); break;
-		case L'c': context->CSGetShaderResources(first, count, views); break;
-	}
-}
-
-static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView *const *views)
-{
-	switch (shader_type) {
-		case L'v': context->VSSetShaderResources(first, count, views); break;
-		case L'h': context->HSSetShaderResources(first, count, views); break;
-		case L'd': context->DSSetShaderResources(first, count, views); break;
-		case L'g': context->GSSetShaderResources(first, count, views); break;
-		case L'p': context->PSSetShaderResources(first, count, views); break;
-		case L'c': context->CSSetShaderResources(first, count, views); break;
-	}
-}
-
 void ShaderResourceBindBatch::run(CommandListState *state)
 {
 	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
@@ -13349,20 +13306,10 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 		GetShaderResourcesBatch(context, target.shader_type, first, count, (ID3D11ShaderResourceView**)bindings.views);
 		break;
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
-		if (target.shader_type == L'c')
-			context->CSGetUnorderedAccessViews(first, count, (ID3D11UnorderedAccessView**)bindings.views);
-		else
-			context->OMGetRenderTargetsAndUnorderedAccessViews(0, NULL, NULL, first, count, (ID3D11UnorderedAccessView**)bindings.views);
+		GetUnorderedAccessViewsBatch(context, target.shader_type, first, count, (ID3D11UnorderedAccessView**)bindings.views);
 		break;
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
-		switch (target.shader_type) {
-			case L'v': context->VSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-			case L'h': context->HSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-			case L'd': context->DSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-			case L'g': context->GSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-			case L'p': context->PSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-			case L'c': context->CSGetConstantBuffers1(first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes); break;
-		}
+		GetConstantBuffersBatch(context, target.shader_type, first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes);
 		// Same unit conversion as GetResource(): constants -> bytes
 		for (unsigned i = 0; i < count; i++) {
 			bindings.cb_offsets[i] *= 16;
@@ -13405,32 +13352,15 @@ static void SetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 		SetShaderResourcesBatch(context, target.shader_type, first, count, (ID3D11ShaderResourceView *const *)bindings.views);
 		break;
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
-		if (target.shader_type == L'c')
-			context->CSSetUnorderedAccessViews(first, count, (ID3D11UnorderedAccessView *const *)bindings.views, bindings.uav_counters);
-		else
-			context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, NULL, NULL,
-				first, count, (ID3D11UnorderedAccessView *const *)bindings.views, bindings.uav_counters);
+		SetUnorderedAccessViewsBatch(context, target.shader_type, first, count,
+				(ID3D11UnorderedAccessView *const *)bindings.views, bindings.uav_counters);
 		break;
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 		if (cb_regions) {
-			switch (target.shader_type) {
-				case L'v': context->VSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-				case L'h': context->HSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-				case L'd': context->DSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-				case L'g': context->GSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-				case L'p': context->PSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-				case L'c': context->CSSetConstantBuffers1(first, count, bindings.buffers, cb_first, cb_counts); break;
-			}
+			SetConstantBufferRegionsBatch(context, target.shader_type, first, count, bindings.buffers, cb_first, cb_counts);
 			break;
 		}
-		switch (target.shader_type) {
-			case L'v': context->VSSetConstantBuffers(first, count, bindings.buffers); break;
-			case L'h': context->HSSetConstantBuffers(first, count, bindings.buffers); break;
-			case L'd': context->DSSetConstantBuffers(first, count, bindings.buffers); break;
-			case L'g': context->GSSetConstantBuffers(first, count, bindings.buffers); break;
-			case L'p': context->PSSetConstantBuffers(first, count, bindings.buffers); break;
-			case L'c': context->CSSetConstantBuffers(first, count, bindings.buffers); break;
-		}
+		SetConstantBuffersBatch(context, target.shader_type, first, count, bindings.buffers);
 		break;
 	}
 }
