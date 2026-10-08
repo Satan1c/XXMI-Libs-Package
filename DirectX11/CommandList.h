@@ -87,9 +87,9 @@ public:
 	ID3D11ShaderResourceView *cursor_color_view;
 	RECT window_rect;
 
-	// Resources resolved by a property read while an expression is being evaluated,
-	// in storage ResolvedResourceScope owns for the length of that evaluation.
-	// Null in between, which is what stops a resolve outliving the one place where nothing can rebind what it read.
+	// Resources resolved by a property read or a filter index comparison during a run,
+	// in storage ResolvedResourceScope owns for the length of that run.
+	// Emptied by anything that binds, which is what stops a resolve outliving what it read.
 	ResolvedResource *resolved_resources;
 	unsigned resolved_count;
 	unsigned resolved_capacity;
@@ -1167,7 +1167,8 @@ struct ResolvedResourceKey {
 	}
 };
 
-// A target resolved to what it holds, with the description read off it at most once however many properties ask.
+// A target resolved to what it holds, with the description read off it at most once however many properties ask,
+// and the texture filter index worked out at most once however many conditions compare it.
 // Owns the references it resolved.
 struct ResolvedResource {
 	ResolvedResourceKey key;
@@ -1176,11 +1177,21 @@ struct ResolvedResource {
 	// Only once info.resource is known to be there:
 	// a target with nothing bound resolves to no resource, and has no description to read:
 	const ResourceDescInfo &Description();
+
+	// What `o0 == 1234` compares:
+	// the filter_index of the highest priority [TextureOverride] matching this resource,
+	// which costs a handle info lookup, the global lock and a walk of its candidates to work out.
+	// Filled by the first condition that asks, read by the rest.
+	bool FilterIndex(float *filter_index) const;
+	void SetFilterIndex(float filter_index);
+
 	void Release();
 
 private:
 	ResourceDescInfo desc;
 	bool described = false;
+	float filter = 0.0f;
+	bool filtered = false;
 };
 
 // A resolve made for one read, which the read is finished with at the end of its scope:
@@ -1256,7 +1267,10 @@ public:
 	// The caller owns a reference on the resource returned and on info->view,
 	// and info->resource is left alone.
 	// dst is only used to substantiate a custom resource with the bind flags its destination needs.
-	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL);
+	// resolved_custom is the custom resource the caller has already resolved,
+	// so that a dynamic pool index (PoolFoo[$i]) is evaluated once, not twice.
+	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL,
+			CustomResource *resolved_custom=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
@@ -1264,6 +1278,10 @@ public:
 			CommandListState *state,
 			bool *resource_found,
 			TextureOverrideMatches *matches);
+	// The same matching, for a resource already resolved,
+	// which is how a filter index comparison gets at it without resolving again:
+	void MatchTextureOverrides(CommandListState *state, const ResourceCopyInfo &info, TextureOverrideMatches *matches);
+	float TextureFilterIndex(CommandListState *state);
 
 	float GetResourceId(CommandListState* state);
 	float GetPoolId();
@@ -1988,19 +2006,19 @@ public:
 	bool optimise(HackerDevice *device, std::shared_ptr<CommandListEvaluatable> *replacement) override;
 };
 
-// Holds the resolves made while one expression is evaluated,
-// so that every property read of one resource shares a single resolve of it.
+// Holds the resolves made during one command list run,
+// so that every property read and every texture filter comparison of one resource shares a single resolve of it.
+// Anything that binds clears them all: see SetResource().
 class ResolvedResourceScope {
 public:
 	explicit ResolvedResourceScope(CommandListState *state);
 	~ResolvedResourceScope();
 
 private:
-	// Enough for the expressions that read more than one property of a thing:
-	// an aspect ratio, a stride beside a size.
-	// A fifth resource in one expression resolves on its own, as all of them did before.
-	ResolvedResource resolved[4];
-	CommandListState *owner; // Null unless this scope is the one that opened it
+	// A run reads a handful of distinct things: vb0, vb2, so0, a couple of slots, a custom resource or two.
+	// Past that, a resolve happens as it did before rather than evicting anything.
+	ResolvedResource resolved[8];
+	CommandListState *owner;
 };
 
 class CommandListExpression {
