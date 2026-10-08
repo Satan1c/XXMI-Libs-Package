@@ -9926,6 +9926,61 @@ static void SetUnorderedAccessViewsBatch(ID3D11DeviceContext1 *context, wchar_t 
 #pragma endregion PipelineStageCalls
 
 
+// The resource a view a Get call just handed us is of, passing the view's
+// reference on to the caller through *view. A view of nothing is released here
+// and reads as no resource at all, which is also what an empty slot reads as.
+static ID3D11Resource *resource_from_view(ID3D11View *slot_view, ID3D11View **view)
+{
+	ID3D11Resource *res = NULL;
+
+	if (!slot_view)
+		return NULL;
+
+	slot_view->GetResource(&res);
+	if (!res) {
+		slot_view->Release();
+		return NULL;
+	}
+
+	*view = slot_view;
+	return res;
+}
+
+// A resource the fork holds itself, rather than one read back from the pipeline:
+// the caller is given a reference of its own on both it and its view, since it
+// releases what it is handed and these have to outlive that.
+static ID3D11Resource *share_resource(ID3D11Resource *res, ID3D11View *held_view, ID3D11View **view)
+{
+	if (held_view)
+		held_view->AddRef();
+	*view = held_view;
+
+	if (res)
+		res->AddRef();
+	return res;
+}
+
+// The back buffer, either the one the game was given or the one really being
+// presented. They differ when upscaling is on, which is what makes "bb" worth
+// spelling out as two more targets.
+static ID3D11Resource *get_back_buffer(CommandListState *state, bool fake, const char *which)
+{
+	HackerSwapChain *mHackerSwapChain = state->mHackerDevice->GetHackerSwapChain();
+	ID3D11Resource *res = NULL;
+
+	if (!mHackerSwapChain) {
+		COMMAND_LIST_LOG(state, "  Unable to get access to %sswap chain\n", which);
+		return NULL;
+	}
+
+	if (fake)
+		mHackerSwapChain->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
+	else
+		mHackerSwapChain->GetOrigSwapChain1()->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
+
+	return res;
+}
+
 ID3D11Resource *ResourceCopyTarget::GetResource(
 		CommandListState *state,
 		ID3D11View **view,   // Used by textures, render targets, depth/stencil buffers & UAVs
@@ -9939,7 +9994,6 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	HackerDevice *mHackerDevice = state->mHackerDevice;
 	ID3D11Device1 *mOrigDevice1 = state->mOrigDevice1;
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
-	ID3D11Resource *res = NULL;
 	ID3D11Buffer *buf = NULL;
 	ID3D11Buffer *so_bufs[D3D11_SO_STREAM_COUNT];
 	ID3D11ShaderResourceView *resource_view = NULL;
@@ -9974,18 +10028,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	}
 	case ResourceCopyTargetType::SHADER_RESOURCE:
 		GetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
-
-		if (!resource_view)
-			return NULL;
-
-		resource_view->GetResource(&res);
-		if (!res) {
-			resource_view->Release();
-			return NULL;
-		}
-
-		*view = resource_view;
-		return res;
+		return resource_from_view(resource_view, view);
 
 	// TODO: case ResourceCopyTargetType::SAMPLER: // Not an ID3D11Resource, need to think about this one
 	// TODO: 	break;
@@ -10014,49 +10057,16 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 
 	case ResourceCopyTargetType::RENDER_TARGET:
 		mOrigContext1->OMGetRenderTargets(slot + 1, render_view, NULL);
-
-		if (!take_slot(render_view, slot))
-			return NULL;
-
-		render_view[slot]->GetResource(&res);
-		if (!res) {
-			render_view[slot]->Release();
-			return NULL;
-		}
-
-		*view = render_view[slot];
-		return res;
+		return resource_from_view(take_slot(render_view, slot), view);
 
 	case ResourceCopyTargetType::DEPTH_STENCIL_TARGET:
+		// Depth buffers can't be buffers, so there is no stride or size to report:
 		mOrigContext1->OMGetRenderTargets(0, NULL, &depth_view);
-		if (!depth_view)
-			return NULL;
-
-		depth_view->GetResource(&res);
-		if (!res) {
-			depth_view->Release();
-			return NULL;
-		}
-
-		// Depth buffers can't be buffers
-
-		*view = depth_view;
-		return res;
+		return resource_from_view(depth_view, view);
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		GetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view);
-
-		if (!unordered_view)
-			return NULL;
-
-		unordered_view->GetResource(&res);
-		if (!res) {
-			unordered_view->Release();
-			return NULL;
-		}
-
-		*view = unordered_view;
-		return res;
+		return resource_from_view(unordered_view, view);
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
 		{
@@ -10091,88 +10101,40 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 				return NULL;
 			}
 
-			if (custom_resource->view)
-				custom_resource->view->AddRef();
-			*view = custom_resource->view;
-			if (custom_resource->resource)
-				custom_resource->resource->AddRef();
-			return custom_resource->resource;
+			return share_resource(custom_resource->resource, custom_resource->view, view);
 		}
 
 	case ResourceCopyTargetType::INI_PARAMS:
-		if (mHackerDevice->mIniResourceView)
-			mHackerDevice->mIniResourceView->AddRef();
-		*view = mHackerDevice->mIniResourceView;
-		if (mHackerDevice->mIniTexture)
-			mHackerDevice->mIniTexture->AddRef();
-		return mHackerDevice->mIniTexture;
+		return share_resource(mHackerDevice->mIniTexture, mHackerDevice->mIniResourceView, view);
 
 	case ResourceCopyTargetType::CURSOR_MASK:
 		UpdateCursorResources(state);
-		if (state->cursor_mask_view)
-			state->cursor_mask_view->AddRef();
-		*view = state->cursor_mask_view;
-		if (state->cursor_mask_tex)
-			state->cursor_mask_tex->AddRef();
-		return state->cursor_mask_tex;
+		return share_resource(state->cursor_mask_tex, state->cursor_mask_view, view);
 
 	case ResourceCopyTargetType::CURSOR_COLOR:
 		UpdateCursorResources(state);
-		if (state->cursor_color_view)
-			state->cursor_color_view->AddRef();
-		*view = state->cursor_color_view;
-		if (state->cursor_color_tex)
-			state->cursor_color_tex->AddRef();
-		return state->cursor_color_tex;
+		return share_resource(state->cursor_color_tex, state->cursor_color_view, view);
 
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
 			return state->this_target->GetResource(state, view, stride, offset, format, buf_size, dst, uav_counter);
 
-		if (state->resource) {
-			if (state->view)
-				state->view->AddRef();
-			*view = state->view;
-			if (*state->resource)
-				(*state->resource)->AddRef();
-			return (*state->resource);
-		}
+		if (state->resource)
+			return share_resource(*state->resource, state->view, view);
 
 		COMMAND_LIST_LOG(state, "  \"this\"  is not valid in this context\n");
 		return NULL;
 
+	// bb is the one the game presents to, which is the fake swap chain's buffer
+	// only while upscaling is on:
 	case ResourceCopyTargetType::SWAP_CHAIN:
-		{
-			HackerSwapChain *mHackerSwapChain = mHackerDevice->GetHackerSwapChain();
-			if (mHackerSwapChain) {
-				if (G->bb_is_upscaling_bb)
-					mHackerSwapChain->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
-				else
-					mHackerSwapChain->GetOrigSwapChain1()->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
-			} else
-				COMMAND_LIST_LOG(state, "  Unable to get access to swap chain\n");
-		}
-		return res;
+		return get_back_buffer(state, G->bb_is_upscaling_bb, "");
 
 	case ResourceCopyTargetType::REAL_SWAP_CHAIN:
-		{
-			HackerSwapChain *mHackerSwapChain = mHackerDevice->GetHackerSwapChain();
-			if (mHackerSwapChain)
-				mHackerSwapChain->GetOrigSwapChain1()->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
-			else
-				COMMAND_LIST_LOG(state, "  Unable to get access to real swap chain\n");
-		}
-		return res;
+		return get_back_buffer(state, false, "real ");
 
 	case ResourceCopyTargetType::FAKE_SWAP_CHAIN:
-		{
-			HackerSwapChain *mHackerSwapChain = mHackerDevice->GetHackerSwapChain();
-			if (mHackerSwapChain)
-				mHackerSwapChain->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&res);
-			else
-				COMMAND_LIST_LOG(state, "  Unable to get access to fake swap chain\n");
-		}
-		return res;
+		return get_back_buffer(state, true, "fake ");
 	}
 
 	return NULL;
