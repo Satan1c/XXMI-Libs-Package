@@ -10140,15 +10140,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	return NULL;
 }
 
-void ResourceCopyTarget::SetResource(
-		CommandListState *state,
-		ID3D11Resource *res,
-		ID3D11View *view,
-		UINT stride,
-		UINT offset,
-		DXGI_FORMAT format,
-		UINT buf_size,
-		UINT uav_counter)
+void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopyInfo &binding)
 {
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
 	ID3D11Buffer *buf = NULL;
@@ -10158,6 +10150,10 @@ void ResourceCopyTarget::SetResource(
 	ID3D11RenderTargetView *render_view[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
 	ID3D11DepthStencilView *depth_view = NULL;
 	ID3D11UnorderedAccessView *unordered_view = NULL;
+	// The vertex buffer and constant buffer region calls take these by address,
+	// so they need somewhere of their own to live:
+	UINT vb_stride = 0, vb_offset = 0;
+	UINT cb_first = 0, cb_count = 0;
 
 	// Shadows the member for the dynamic slot case (ps-t[$i]):
 	unsigned slot = ResolveSlot(state);
@@ -10167,27 +10163,27 @@ void ResourceCopyTarget::SetResource(
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 
-		buf = (ID3D11Buffer*)res;
+		buf = (ID3D11Buffer*)binding.resource;
 
-		if (!buf_size) {
-			if (offset > 0)
-				LogOverlayW(LOG_DIRE, L"BUG: SetResource called with offset=%d but buf_size=0 for CONSTANT_BUFFER, falling back to plugging the entire buffer\n", offset);
+		if (!binding.size) {
+			if (binding.offset > 0)
+				LogOverlayW(LOG_DIRE, L"BUG: SetResource called with offset=%d but buf_size=0 for CONSTANT_BUFFER, falling back to plugging the entire buffer\n", binding.offset);
 			SetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf);
 			return;
 		}
 
 		// Derive FirstConstant from data offset in bytes, where each constant is 16 bytes long (4 * 32-bit components).
 		// FirstConstant specifies index of the first constant of CB region that is currently visible to shaders (bound via VSSetConstantBuffers1).
-		offset /= 16;
+		cb_first = binding.offset / 16;
 		// Derive NumConstants from data size in bytes, where each constant is 16 bytes long (4 * 32-bit components).
 		// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
-		buf_size /= 16;
+		cb_count = binding.size / 16;
 
-		SetConstantBufferRegionsBatch(mOrigContext1, shader_type, slot, 1, &buf, &offset, &buf_size);
+		SetConstantBufferRegionsBatch(mOrigContext1, shader_type, slot, 1, &buf, &cb_first, &cb_count);
 		return;
 
 	case ResourceCopyTargetType::SHADER_RESOURCE:
-		resource_view = (ID3D11ShaderResourceView*)view;
+		resource_view = (ID3D11ShaderResourceView*)binding.view;
 		SetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
 		break;
 
@@ -10195,17 +10191,19 @@ void ResourceCopyTarget::SetResource(
 	// TODO: 	break;
 
 	case ResourceCopyTargetType::VERTEX_BUFFER:
-		buf = (ID3D11Buffer*)res;
-		mOrigContext1->IASetVertexBuffers(slot, 1, &buf, &stride, &offset);
+		buf = (ID3D11Buffer*)binding.resource;
+		vb_stride = binding.stride;
+		vb_offset = binding.offset;
+		mOrigContext1->IASetVertexBuffers(slot, 1, &buf, &vb_stride, &vb_offset);
 		break;
 
 	case ResourceCopyTargetType::INDEX_BUFFER:
-		buf = (ID3D11Buffer*)res;
-		mOrigContext1->IASetIndexBuffer(buf, format, offset);
+		buf = (ID3D11Buffer*)binding.resource;
+		mOrigContext1->IASetIndexBuffer(buf, binding.format, binding.offset);
 		break;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		buf = (ID3D11Buffer*)res;
+		buf = (ID3D11Buffer*)binding.resource;
 		mOrigContext1->SOGetTargets(D3D11_SO_STREAM_COUNT, so_bufs);
 		if (so_bufs[slot])
 			so_bufs[slot]->Release();
@@ -10227,7 +10225,7 @@ void ResourceCopyTarget::SetResource(
 		// That is closer to leaving an unmentioned slot alone,
 		// but it changes their behaviour,
 		// so it wants testing in a game that binds several targets.
-		so_offsets[slot] = offset;
+		so_offsets[slot] = binding.offset;
 		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
 		release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
 
@@ -10238,7 +10236,7 @@ void ResourceCopyTarget::SetResource(
 
 		if (render_view[slot])
 			render_view[slot]->Release();
-		render_view[slot] = (ID3D11RenderTargetView*)view;
+		render_view[slot] = (ID3D11RenderTargetView*)binding.view;
 
 		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
 
@@ -10253,7 +10251,7 @@ void ResourceCopyTarget::SetResource(
 
 		if (depth_view)
 			depth_view->Release();
-		depth_view = (ID3D11DepthStencilView*)view;
+		depth_view = (ID3D11DepthStencilView*)binding.view;
 
 		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
 
@@ -10263,20 +10261,20 @@ void ResourceCopyTarget::SetResource(
 		break;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
-		unordered_view = (ID3D11UnorderedAccessView*)view;
-		SetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view, &uav_counter);
+		unordered_view = (ID3D11UnorderedAccessView*)binding.view;
+		SetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view, &binding.uav_counter);
 		break;
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
 	{
 		CustomResource* custom_resource = GetCustomResource(state, true);
 
-		custom_resource->stride = stride;
-		custom_resource->offset = offset;
-		custom_resource->format = format;
-		custom_resource->buf_size = buf_size;
+		custom_resource->stride = binding.stride;
+		custom_resource->offset = binding.offset;
+		custom_resource->format = binding.format;
+		custom_resource->buf_size = binding.size;
 
-		if (res == NULL && view == NULL) {
+		if (binding.resource == NULL && binding.view == NULL) {
 			// Optimisation to allow the resource to be set to null
 			// without throwing away the cache so we don't
 			// endlessly create & destroy temporary resources.
@@ -10290,18 +10288,18 @@ void ResourceCopyTarget::SetResource(
 		// someone assigned a resource to itself), don't needlessly
 		// AddRef() and Release(), and definitely don't Release()
 		// before AddRef()
-		if (custom_resource->view != view) {
+		if (custom_resource->view != binding.view) {
 			if (custom_resource->view)
 				custom_resource->view->Release();
-			custom_resource->view = view;
+			custom_resource->view = binding.view;
 			if (custom_resource->view)
 				custom_resource->view->AddRef();
 		}
 
-		if (custom_resource->resource != res) {
+		if (custom_resource->resource != binding.resource) {
 			if (custom_resource->resource)
 				custom_resource->resource->Release();
-			custom_resource->resource = res;
+			custom_resource->resource = binding.resource;
 			custom_resource->device = state->mOrigDevice1;
 			if (custom_resource->resource)
 				custom_resource->resource->AddRef();
@@ -10310,12 +10308,12 @@ void ResourceCopyTarget::SetResource(
 	}
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
-			return state->this_target->SetResource(state, res, view, stride, offset, format, buf_size, uav_counter);
+			return state->this_target->SetResource(state, binding);
 
 		if (state->resource) {
 			if (*state->resource)
 				(*state->resource)->Release();
-			*state->resource = res;
+			*state->resource = binding.resource;
 			break;
 		}
 
@@ -12649,7 +12647,7 @@ void ResourceCopyOperation::CopyResourceToPool(CommandListState* state, const Re
 void ResourceCopyOperation::SetOrDeferResource(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyInfo& binding)
 {
 	if (!deferred) {
-		dst_target.SetResource(state, binding.resource, binding.view, binding.stride, binding.offset, binding.format, binding.size, binding.uav_counter);
+		dst_target.SetResource(state, binding);
 		return;
 	}
 
@@ -13651,7 +13649,10 @@ void SlotRangeCopyOperation::FetchSlotRef(CommandListState *state, const SlotRan
 
 	target.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
 	target.SetCustomResource(element);
-	target.SetResource(state, resource, bindings.View(index), 0, bindings.Offset(index), DXGI_FORMAT_UNKNOWN, bindings.Size(index));
+	ResourceCopyInfo binding(resource, bindings.View(index));
+	binding.offset = bindings.Offset(index);
+	binding.size = bindings.Size(index);
+	target.SetResource(state, binding);
 }
 
 void SlotRangeCopyOperation::RunFetch(CommandListState *state, unsigned first, unsigned count, int pool_first)

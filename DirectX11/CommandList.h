@@ -1101,14 +1101,7 @@ public:
 			UINT *buf_size,
 			ResourceCopyTarget *dst=NULL,
 			UINT *uav_counter=NULL);
-	void SetResource(CommandListState *state,
-			ID3D11Resource *res,
-			ID3D11View *view,
-			UINT stride,
-			UINT offset,
-			DXGI_FORMAT format,
-			UINT buf_size,
-			UINT uav_counter=(UINT)-1);
+	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 
 	void FindTextureOverrides(
 			CommandListState *state,
