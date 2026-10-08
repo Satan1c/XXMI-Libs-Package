@@ -1012,6 +1012,39 @@ private:
 };
 
 
+// A resource and how to read it: the view it came from,
+// plus the buffer layout that neither of them always knows on its own.
+// A structured buffer's stride comes from the resource,
+// a typed buffer's from the view's format,
+// a constant buffer's region from the call that bound it.
+// The copy pipeline passes all of this around as one value:
+// every stage either forwards it untouched, or fills in what was still unknown.
+struct ResourceCopyInfo {
+	ID3D11Resource *resource = nullptr;
+	ID3D11View *view = nullptr;
+	UINT stride = 0;
+	UINT offset = 0; // In bytes
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	UINT size = 0;   // In bytes
+	// Applied if this ends up in a UAV slot. -1 leaves the count alone:
+	UINT uav_counter = (UINT)-1;
+
+	ResourceCopyInfo() {}
+	ResourceCopyInfo(ID3D11Resource *resource, ID3D11View *view) :
+		resource(resource), view(view)
+	{}
+
+	// Adopts the layout, and the UAV count, of the other side of the copy;
+	// keeps the resource, view and size of this one:
+	void TakeLayoutFrom(const ResourceCopyInfo &other)
+	{
+		stride = other.stride;
+		offset = other.offset;
+		format = other.format;
+		uav_counter = other.uav_counter;
+	}
+};
+
 class ResourceCopyTarget : public SyntaxTarget
 {
 public:
@@ -1060,22 +1093,13 @@ public:
 	CustomResource* GetCustomResource(CommandListState* state, bool is_assignment = false);
 	CommandListVariable* GetPoolVariable(CommandListState* state, bool is_assignment = false);
 
-	ID3D11Resource *GetResource(CommandListState *state,
-			ID3D11View **view,
-			UINT *stride,
-			UINT *offset,
-			DXGI_FORMAT *format,
-			UINT *buf_size,
-			ResourceCopyTarget *dst=NULL,
-			UINT *uav_counter=NULL);
-	void SetResource(CommandListState *state,
-			ID3D11Resource *res,
-			ID3D11View *view,
-			UINT stride,
-			UINT offset,
-			DXGI_FORMAT format,
-			UINT buf_size,
-			UINT uav_counter=(UINT)-1);
+	// What the target holds right now, with the layout it is bound with filled
+	// into info. The caller owns a reference on the resource returned and on
+	// info->view, and info->resource is left alone. dst is only used to
+	// substantiate a custom resource with the bind flags its destination needs.
+	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL);
+	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
+	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
 	void FindTextureOverrides(
 			CommandListState *state,
@@ -1100,6 +1124,15 @@ public:
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
 private:
+	// What every <target>->Property accessor shares. ResourceProperty() resolves
+	// the target, hands read() the resource, and releases what it resolved;
+	// PropertyCustomResource() is the metadata a custom resource answers from
+	// first; BufferRegionOffset() is where in a buffer slot the contents start.
+	template <typename ReadProperty>
+	float ResourceProperty(CommandListState *state, ReadProperty read);
+	bool PropertyCustomResource(CommandListState *state, CustomResource **custom_resource);
+	UINT BufferRegionOffset(CommandListState *state, const ResourceCopyInfo &info);
+
 	bool AcceptParsedTarget(IniParserResult ret, bool allow_range) const;
 	bool ParseRangeBounds(const wstring& text, size_t colon, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPrefix(const wchar_t*& target, size_t& length);
@@ -1186,39 +1219,6 @@ struct DeferredBinding {
 enum class BatchDirection {
 	Bind,
 	Fetch,
-};
-
-// A resource and how to read it: the view it came from,
-// plus the buffer layout that neither of them always knows on its own.
-// A structured buffer's stride comes from the resource,
-// a typed buffer's from the view's format,
-// a constant buffer's region from the call that bound it.
-// The copy pipeline passes all of this around as one value:
-// every stage either forwards it untouched, or fills in what was still unknown.
-struct ResourceCopyInfo {
-	ID3D11Resource *resource = nullptr;
-	ID3D11View *view = nullptr;
-	UINT stride = 0;
-	UINT offset = 0; // In bytes
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-	UINT size = 0;   // In bytes
-	// Applied if this ends up in a UAV slot. -1 leaves the count alone:
-	UINT uav_counter = (UINT)-1;
-
-	ResourceCopyInfo() {}
-	ResourceCopyInfo(ID3D11Resource *resource, ID3D11View *view) :
-		resource(resource), view(view)
-	{}
-
-	// Adopts the layout, and the UAV count, of the other side of the copy;
-	// keeps the resource, view and size of this one:
-	void TakeLayoutFrom(const ResourceCopyInfo &other)
-	{
-		stride = other.stride;
-		offset = other.offset;
-		format = other.format;
-		uav_counter = other.uav_counter;
-	}
 };
 
 // Where a copy keeps the resource and view it creates between runs.
@@ -1903,9 +1903,7 @@ public:
 
 	ClearViewCommand();
 
-	ID3D11View* create_best_view(ID3D11Resource *resource,
-		CommandListState *state, UINT stride,
-		UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	ID3D11View* create_best_view(ID3D11Resource *resource, CommandListState *state, ResourceCopyInfo info);
 	void clear_unknown_view(ID3D11View*, CommandListState *state);
 
 	void run(CommandListState*) override;
