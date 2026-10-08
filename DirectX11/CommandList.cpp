@@ -3000,6 +3000,11 @@ void RunCustomShaderCommand::run(CommandListState *state)
 	mOrigContext1->RSSetViewports(num_viewports, saved_viewports);
 	restore_om_state(mOrigContext1, &om_state);
 
+	// restore_om_state() rebinds the render targets, the depth target and the UAVs with one OMSetRenderTargetsAndUnorderedAccessViews() of its own,
+	// so it is the one bind in a command list run that does not pass through SetResource().
+	// A resolve of o#, oD or u# made while this custom shader ran describes what it bound, not what is bound now:
+	invalidate_resolved_resources(state);
+
 	if (saved_vs)
 		saved_vs->Release();
 	if (saved_hs)
