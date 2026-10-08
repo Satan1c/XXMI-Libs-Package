@@ -2717,11 +2717,11 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 	// shaders - hook them up and allow them to be overridden as well.
 	//
 	// Until then, a shader created here never passes through CreateShader(),
-	// so it gets no hash in G->mShaders and no cached bindings. Everything
-	// keyed off that lookup passes it by: hunting never sees it, and neither
-	// [ShaderOverride] nor replacement from ShaderFixes applies to it. The
-	// buffers it writes are still reachable from the command list as so0..3,
-	// which is the only handle a fix has on a stream output pass.
+	// so it gets no hash in G->mShaders and no cached bindings.
+	// Everything keyed off that lookup passes it by: hunting never sees it,
+	// and neither [ShaderOverride] nor ShaderFixes applies to it.
+	// The buffers it writes are reachable from the command list as so0..3,
+	// the only handle a fix has on a stream output pass.
 
 	HRESULT hr = mOrigDevice1->CreateGeometryShaderWithStreamOutput(pShaderBytecode, BytecodeLength, pSODeclaration,
 		NumEntries, pBufferStrides, NumStrides, RasterizedStream, pClassLinkage, ppGeometryShader);

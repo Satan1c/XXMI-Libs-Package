@@ -5559,10 +5559,9 @@ static void log_syntax_tree(T token, const char *msg)
 
 #pragma region CommandListExpressions
 
-// Applies the operator precedence passes to a tokenised expression and
-// finalises it. Syntax errors propagate as CommandListSyntaxError, like
-// from tokenise(): the caller catches both and reports them against the
-// text it built the tokens from.
+// Runs the precedence passes over a tokenised expression and finalises it.
+// Syntax errors propagate as CommandListSyntaxError, like from tokenise():
+// the caller catches both and reports them against the text they came from.
 static std::shared_ptr<CommandListEvaluatable> transform_expression(CommandListSyntaxTree &tree, uint32_t operator_mask)
 {
 	group_parenthesis(&tree);
@@ -5635,10 +5634,11 @@ bool CommandListExpression::parse_compound(const wstring *target, const wstring 
 	CommandListSyntaxTree tree(0);
 	uint32_t operator_mask = 0;
 
-	// "$x += 1" evaluates as "$x + (1)": the target becomes the left operand
-	// and the right hand side is parenthesised so it is evaluated as a
-	// whole. The target was validated by the assignment parser, so any
-	// syntax error is in the right hand side and is reported against it:
+	// "$x += 1" evaluates as "$x + (1)":
+	// the target becomes the left operand,
+	// and the right hand side is parenthesised so it is evaluated whole.
+	// The target was validated by the assignment parser,
+	// so any syntax error is in the right hand side, reported against it:
 	try {
 		tokenise(target, &tree, ini_namespace, scope, &operator_mask);
 
@@ -9320,8 +9320,8 @@ bool ParseCommandListResourceCopyTargetDirective(
 
 #pragma region CompoundAssignment
 
-// Splits "$x +" / "1" (from "$x += 1") into target, binary operator and
-// right hand side.
+// Takes "$x +" / "1" (from "$x += 1") apart:
+// target, binary operator and right hand side.
 static bool split_compound_assignment(const wchar_t *key, const wstring *val,
 		wstring *target, wstring *op, wstring *rhs)
 {
@@ -9331,8 +9331,8 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val,
 		L"+", L"-", L"*", L"/", L"%", L"&", L"|", L"^",
 	};
 
-	// The ini reader split "$x += 1" at the "=", leaving the operator at
-	// the end of the key:
+	// The ini reader split "$x += 1" at the "=",
+	// which leaves the operator at the end of the key:
 	size_t key_len = wcslen(key);
 	for (const wchar_t *candidate : compound_operators) {
 		size_t len = wcslen(candidate);
@@ -9352,9 +9352,9 @@ static bool split_compound_assignment(const wchar_t *key, const wstring *val,
 	return !target->empty();
 }
 
-// $x += 1, x0 *= 2, $PoolFoo[$i] |= 4 and every other binary operator. The
-// target's own assignment parser builds the command, with the expression
-// "target op (rhs)" assembled by CommandListExpression::parse_compound.
+// $x += 1, x0 *= 2, $PoolFoo[$i] |= 4 and every other binary operator.
+// The target's own assignment parser builds the command,
+// from the expression "target op (rhs)" that parse_compound assembles.
 bool ParseCommandListCompoundAssignment(const wchar_t *section,
 		const wchar_t *key, wstring *val, const wstring *raw_line,
 		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
@@ -9367,10 +9367,10 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 
 	bool parsed;
 	if (target[0] == L'$' && target.back() == L']') {
-		// Pool variable: $PoolFoo[$i]. Same as in
-		// ParseCommandListResourceCopyTargetDirective, an unresolved pool
-		// variable still parses as VARIABLE and is left to
-		// parse_pool_variable_operation to reject or record:
+		// Pool variable: $PoolFoo[$i].
+		// As in ParseCommandListResourceCopyTargetDirective,
+		// an unresolved pool variable still parses as VARIABLE,
+		// and parse_pool_variable_operation rejects or records it:
 		ResourceCopyTarget dst;
 		if (!dst.ParseTarget(target.c_str(), false, ini_namespace, command_list->scope)
 			&& dst.evaluation_mode != ResourceCopyTargetEvaluationMode::VARIABLE)
@@ -9389,8 +9389,8 @@ bool ParseCommandListCompoundAssignment(const wchar_t *section,
 	if (!parsed)
 		return false;
 
-	// Frame analysis log shows the line as written ("$x +" + "= 1" when
-	// there is no raw line to take it from):
+	// Frame analysis log shows the line as written
+	// ("$x +" + "= 1" when there is no raw line to take it from):
 	command_list->commands.back()->ini_line = L"[" + wstring(section) + L"] " + (raw_line ? *raw_line : wstring(key) + L"= " + *val);
 	return true;
 }
@@ -9760,22 +9760,24 @@ bool ResourceCopyTarget::ResolveRange(CommandListState *state, int *first, unsig
 	return true;
 }
 
-// Stream output targets and render targets are driven a whole array at a
-// time: D3D11 has no call that reads or writes one slot of either, and
-// nothing in HackerContext shadows their state - SOSetTargets() and
-// OMSetRenderTargets() pass straight through - so the device is the only
-// place the current bindings can be read back from. A command that drives
-// one slot therefore reads the array, swaps its one entry, sets the array
-// again, and drops the references the Get call handed it.
+// Stream output and render targets are driven a whole array at a time:
+// D3D11 has no call that reads or writes one slot of either,
+// and nothing in HackerContext shadows their state,
+// so the device is the only place the current bindings can be read back from.
+// SOSetTargets() and OMSetRenderTargets() pass straight through.
 //
-// The two helpers below hold the reference counting that goes with that.
-// It lives here rather than in each case because doing it right in one place
-// and wrong in another is exactly how a stream output bind came to release a
-// buffer it had never taken a reference on.
+// A command that drives one slot therefore reads the array,
+// swaps its one entry, sets the array again,
+// and drops the references the Get call handed it.
+//
+// The two helpers below hold the reference counting that goes with that,
+// rather than each case repeating it.
+// Repeating it is how a stream output bind came to over-release a buffer.
 
 // The slot wanted out of an array that was read with a count of slot + 1,
-// having dropped the references on the slots below it. The one returned still
-// carries the reference the Get call took, which the caller passes on.
+// having dropped the references on the slots below it.
+// The one returned still carries the reference the Get call took,
+// which the caller passes on.
 template <typename T>
 static T* take_slot(T **array, unsigned slot)
 {
@@ -9788,10 +9790,11 @@ static T* take_slot(T **array, unsigned slot)
 	return array[slot];
 }
 
-// Drops the references a Get call took on an array of slots, keeping the one
-// the caller has since overwritten with an object of its own: that slot holds
-// a reference the caller still owns, and the Set call has taken its own. With
-// no slot to keep, every reference is dropped.
+// Drops the references a Get call took on an array of slots,
+// keeping the one the caller has since overwritten with an object of its own:
+// that slot holds a reference the caller still owns,
+// and the Set call has taken its own.
+// With no slot to keep, every reference is dropped.
 template <typename T>
 static void release_slots(T **array, unsigned count, unsigned keep = UINT_MAX)
 {
@@ -9924,8 +9927,8 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		return buf;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
-		// D3D11 has no call that reports the offset a target was bound
-		// at, so an `so` source reads as offset 0 whatever the game set,
+		// D3D11 cannot report the offset a target was bound at.
+		// An `so` source reads as offset 0 whatever the game set,
 		// and `->Region` on one measures from the start of the buffer:
 		mOrigContext1->SOGetTargets(slot + 1, so_bufs);
 		return take_slot(so_bufs, slot);
@@ -10245,23 +10248,22 @@ void ResourceCopyTarget::SetResource(
 			so_bufs[slot]->Release();
 		so_bufs[slot] = buf;
 
-		// An offset has the shader write into part of the buffer rather
-		// than from the start of it, so a draw call can re-skin one
-		// object out of a mesh several of them share:
+		// An offset has the shader write into part of the buffer,
+		// not from the start of it,
+		// so a draw call can re-skin one object out of a shared mesh:
 		//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
 		//
-		// The slots this is not binding keep the offset 0 they were
-		// given when offsets were passed as NULL: SOGetTargets() does
-		// not report the offsets they were bound at, so there is nothing
-		// to put back.
+		// The slots this is not binding keep the offset 0,
+		// which is what they were given when offsets were NULL:
+		// SOGetTargets() does not report the offsets they were bound at,
+		// so there is nothing to put back.
 		//
-		// XXX: Passing (UINT)-1 for those slots may well be better: it
-		// means "append", so the stage carries on from wherever its last
-		// stream output write to that buffer ended instead of starting
-		// over and overwriting it. That is the closer thing to leaving a
-		// slot the ini line never mentioned alone, but it is a change in
-		// behaviour for those slots, so it wants testing of its own in a
-		// game that binds more than one stream output target.
+		// XXX: (UINT)-1 for those slots may well be better.
+		// It means "append": the stage carries on writing,
+		// instead of starting over and overwriting what is there.
+		// That is closer to leaving an unmentioned slot alone,
+		// but it changes their behaviour,
+		// so it wants testing in a game that binds several targets.
 		so_offsets[slot] = offset;
 		mOrigContext1->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
 		release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
@@ -10292,8 +10294,8 @@ void ResourceCopyTarget::SetResource(
 
 		mOrigContext1->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, render_view, depth_view);
 
-		// The depth view this replaced them with is the caller's, so
-		// there is no slot to keep here:
+		// Only the depth view was replaced, and it is the caller's,
+		// so no slot of this array is kept:
 		release_slots(render_view, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
 		break;
 
@@ -13047,9 +13049,10 @@ void ShaderResourceBindBatch::run(CommandListState *state)
 		if (binding.resource)
 			binding.resource->Release();
 
-		// Through BatchTarget(), not dst: a folded if/elif/else chain
-		// leaves its own dst unset, and the slot it drives is its
-		// branches'. Reading dst here would index from slot 0:
+		// Through BatchTarget(), not dst:
+		// a folded if/elif/else chain leaves its own dst unset,
+		// and the slot it drives is its branches'.
+		// Reading dst here would index from slot 0:
 		unsigned i = op->BatchTarget(BatchDirection::Bind).slot - first_slot;
 		if (views[i])
 			views[i]->Release();
@@ -13075,8 +13078,8 @@ void ShaderResourceFetchBatch::run(CommandListState *state)
 	GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
 	for (auto &op : operations) {
-		// Through BatchTarget(), not src, for the reason the bind batch
-		// gives above:
+		// Through BatchTarget(), not src,
+		// for the reason the bind batch gives above:
 		ID3D11ShaderResourceView *view = views[op->BatchTarget(BatchDirection::Fetch).slot - first_slot];
 		ID3D11Resource *resource = NULL;
 
@@ -13141,8 +13144,8 @@ static bool same_batch_target(const ResourceCopyOperation *op, const ResourceCop
 	return target.shader_type == fixed.shader_type && target.slot == fixed.slot;
 }
 
-// Every branch was checked to drive the same slot, so the first one speaks for
-// the chain.
+// Every branch was checked to drive the same slot,
+// so the first one speaks for the chain.
 const ResourceCopyTarget& ConditionalSlotCopyOperation::BatchTarget(BatchDirection direction) const
 {
 	return branches[0].op->BatchTarget(direction);
@@ -13165,16 +13168,17 @@ void ConditionalSlotCopyOperation::run(CommandListState *state)
 		return;
 	}
 
-	// Hand our own deferred binding through to whichever branch's
-	// operation matched, and let it run with its own dst/src/options
+	// Hand our own deferred binding to whichever branch matched,
+	// and let its operation run with its own dst/src/options,
 	// exactly as if it had run standalone:
 	branch->op->deferred = deferred;
 	branch->op->run(state);
 	branch->op->deferred = NULL;
 }
 
-// Fetch direction: ShaderResourceFetchBatch already read the slot and hands
-// its contents to whichever branch matched.
+// Fetch direction:
+// ShaderResourceFetchBatch already read the slot,
+// and hands its contents to whichever branch matched.
 void ConditionalSlotCopyOperation::RunWithSource(CommandListState *state, ID3D11Resource *src_resource, ID3D11View *src_view)
 {
 	ConditionalSlotBranch *branch = MatchingBranch(state);
@@ -13185,9 +13189,9 @@ void ConditionalSlotCopyOperation::RunWithSource(CommandListState *state, ID3D11
 }
 
 // Whether an expression reads pipeline state (ps-t0, ps-t0->Width, ...).
-// Inside a batch the binds of the run are deferred to its end, so such a
-// condition would see the bindings from before the run rather than the ones
-// the lines above it just made.
+// Inside a batch the binds of the run are deferred to its end,
+// so such a condition would see the bindings from before the run,
+// rather than the ones the lines above it just made.
 static bool expression_reads_pipeline(CommandListEvaluatable *node)
 {
 	if (auto operand = dynamic_cast<CommandListOperand *>(node))
@@ -13198,11 +13202,11 @@ static bool expression_reads_pipeline(CommandListEvaluatable *node)
 	return false;
 }
 
-// An if/elif/else chain is registered in both the pre and the post list of its
-// section, and the optimiser works on one list at a time. Only the half that
-// belongs to the list being optimised may be folded into it, or a chain whose
-// assignments are all "pre" would be folded a second time into the post list
-// and applied again after the draw call.
+// An if/elif/else chain is registered in both of its section's lists,
+// and the optimiser works on one list at a time.
+// Only the half that belongs to the list being optimised may be folded into it.
+// Otherwise a chain whose assignments are all "pre" would be folded again,
+// into the post list, and applied a second time after the draw call.
 enum class CommandListPhase {
 	Pre,
 	Post,
@@ -13214,8 +13218,9 @@ static const CommandList::Commands& branch_commands(const std::shared_ptr<Comman
 	return (phase == CommandListPhase::Pre ? pre : post)->commands;
 }
 
-// The one batchable operation a branch runs in this phase, or nullptr when the
-// branch is not shaped for folding: it runs nothing, or more than one command,
+// The one batchable operation a branch runs in this phase,
+// or nullptr when the branch is not shaped for folding:
+// it runs nothing, or more than one command,
 // or a command that is not a batchable copy in this direction.
 static std::shared_ptr<ResourceCopyOperation> extract_batchable_branch(const CommandList::Commands &commands,
 	BatchDirection direction)
@@ -13230,10 +13235,11 @@ static std::shared_ptr<ResourceCopyOperation> extract_batchable_branch(const Com
 	return op;
 }
 
-// A bind batch writes every slot in its range, so a chain that may leave its
-// slot alone - no branch taken, or an unless_null branch whose source turns
-// out to be null - has to ask for the current binding first, exactly as a
-// plain unless_null line does.
+// A bind batch writes every slot in its range,
+// so a chain that may leave its slot alone has to ask for the current binding,
+// exactly as a plain unless_null line does.
+// That happens when no branch is taken,
+// or when an unless_null branch's source turns out to be null.
 static bool chain_may_keep_binding(const std::vector<ConditionalSlotBranch> &branches)
 {
 	for (auto &branch : branches) {
@@ -13244,10 +13250,11 @@ static bool chain_may_keep_binding(const std::vector<ConditionalSlotBranch> &bra
 	return false;
 }
 
-// Appends one entry per branch of a simple if/elif/else chain. Fails unless
-// every reachable branch runs exactly one batchable operation on the slot the
-// first branch fixed, or is the final empty else, which means "leave the
-// current binding" - the same thing unless_null already does for a batch.
+// Appends one entry per branch of a simple if/elif/else chain.
+// Fails unless every reachable branch runs exactly one batchable operation,
+// on the slot the first branch fixed.
+// The final empty else is allowed, and means "leave the current binding",
+// which is the same thing unless_null already does for a batch.
 static bool collect_conditional_chain(IfCommand *if_cmd, BatchDirection direction, CommandListPhase phase,
 	std::vector<ConditionalSlotBranch> &out)
 {
@@ -13259,8 +13266,9 @@ static bool collect_conditional_chain(IfCommand *if_cmd, BatchDirection directio
 	if (!op)
 		return false;
 
-	// out[0] always carries an operation, since the empty else below is only
-	// appended after a real branch, so it is the one that fixed the slot:
+	// out[0] always carries an operation,
+	// since the empty else below is only appended after a real branch,
+	// so it is the one that fixed the slot:
 	if (!out.empty() && !same_batch_target(op.get(), out[0].op.get(), direction))
 		return false;
 
@@ -13288,9 +13296,9 @@ static bool collect_conditional_chain(IfCommand *if_cmd, BatchDirection directio
 	return true;
 }
 
-// Folds an if/elif/else chain whose every reachable branch drives the same
-// slot into one operation that can take its place inside a batch, or returns
-// nullptr when the chain is not shaped for that.
+// Folds an if/elif/else chain whose every reachable branch drives one slot,
+// into a single operation that can take its place inside a batch.
+// Returns nullptr when the chain is not shaped for that.
 static std::shared_ptr<ResourceCopyOperation> fold_conditional_slot_chain(const std::shared_ptr<IfCommand> &if_cmd,
 	BatchDirection direction, CommandListPhase phase)
 {
@@ -13308,9 +13316,9 @@ static std::shared_ptr<ResourceCopyOperation> fold_conditional_slot_chain(const 
 	return folded;
 }
 
-// An operation that ends up outside any batch goes back into the list as it
-// was: for a folded if/elif/else chain that is the original IfCommand, so it
-// runs and logs exactly as before.
+// An operation that ends up outside any batch goes back into the list as it was.
+// For a folded if/elif/else chain that is the original IfCommand,
+// so it runs and logs exactly as before.
 static std::shared_ptr<CommandListCommand> unbatched(const std::shared_ptr<ResourceCopyOperation> &op)
 {
 	if (auto folded = std::dynamic_pointer_cast<ConditionalSlotCopyOperation>(op))
@@ -13430,9 +13438,8 @@ void merge_shader_resource_batches(CommandList *command_list)
 			else if (!is_batchable_bind(op.get()))
 				op = nullptr;
 		} else if (auto if_cmd = std::dynamic_pointer_cast<IfCommand>(command)) {
-			// An if/elif/else where every branch targets the same fixed
-			// slot is folded in and batched instead of acting as a hard
-			// break:
+			// A chain that targets one fixed slot is folded in,
+			// rather than acting as a hard break:
 			for (BatchDirection candidate : { BatchDirection::Bind, BatchDirection::Fetch }) {
 				op = fold_conditional_slot_chain(if_cmd, candidate, phase);
 				if (op) {

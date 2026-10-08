@@ -1180,9 +1180,9 @@ struct DeferredBinding {
 	bool assigned = false; // false: unless_null kept the current binding
 };
 
-// Which side of a batchable copy the batch owns: a bind batch drives the
-// destination slot, a fetch batch reads the source slot. Everything in the
-// optimiser that differs between the two is selected by this.
+// Which side of a batchable copy the batch owns:
+// a bind batch drives the destination slot, a fetch batch reads the source.
+// Everything in the optimiser that differs between the two is selected by this.
 enum class BatchDirection {
 	Bind,
 	Fetch,
@@ -1256,8 +1256,9 @@ public:
 	void run(CommandListState*) override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
 	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
-	// The slot a batch groups this operation by. A folded if/elif/else chain
-	// overrides it, since the slot it drives is its branches', not its own:
+	// The slot a batch groups this operation by.
+	// A folded if/elif/else chain overrides it:
+	// the slot it drives is its branches', not its own.
 	virtual const ResourceCopyTarget& BatchTarget(BatchDirection direction) const;
 
 private:
@@ -1306,28 +1307,30 @@ public:
 };
 
 // One branch of an if/elif/else chain folded into a ConditionalSlotCopyOperation:
-// condition is NULL for the unconditional terminal branch (else, or the "no
-// branch taken" sentinel below), op is NULL when that branch makes no
-// assignment at all (a missing else - leave the current binding, same as
-// unless_null).
+// condition is NULL for the unconditional terminal branch,
+// the else, or the "no branch taken" sentinel below.
+// op is NULL when that branch makes no assignment at all:
+// a missing else leaves the current binding, the same as unless_null.
 struct ConditionalSlotBranch {
 	CommandListExpression *condition;
 	std::shared_ptr<ResourceCopyOperation> op;
 };
 
-// An if/elif/else chain where every reachable branch targets the same fixed
-// slot, folded by the optimiser into one operation so it can sit inside a
-// ShaderResourceBindBatch/FetchBatch instead of acting as a hard break.
-// Evaluates the conditions at run time and defers to whichever branch's
-// operation matched. Its own dst/src are never used: the copy belongs to the
-// branch, and the slot the batch groups by comes from BatchTarget().
+// A chain of if/elif/else where every reachable branch targets the same slot,
+// always a fixed one, folded by the optimiser into a single operation.
+// It can then sit inside a ShaderResourceBindBatch/FetchBatch,
+// instead of acting as a hard break.
+//
+// The conditions are evaluated at run time, and whichever branch matched runs.
+// Its own dst/src are never used:
+// the copy belongs to the branch, and the batch groups by BatchTarget().
 class ConditionalSlotCopyOperation : public ResourceCopyOperation {
 public:
 	BatchDirection direction = BatchDirection::Bind;
 	std::vector<ConditionalSlotBranch> branches;
-	// The chain this was folded from. Held because `branches` points into its
-	// CommandListExpressions, and because an operation left out of a batch
-	// goes back into the command list as the chain itself:
+	// The chain this was folded from, held for two reasons:
+	// `branches` points into its CommandListExpressions,
+	// and an operation left out of a batch goes back in as the chain itself:
 	std::shared_ptr<CommandListCommand> source_if;
 
 	void run(CommandListState*) override;
@@ -1704,8 +1707,8 @@ public:
 	std::shared_ptr<CommandListEvaluatable> evaluatable;
 
 	bool parse(const wstring *expression, const wstring *ini_namespace, CommandListScope *scope);
-	// Compound assignment: the expression "target op (rhs)", e.g. "$x + (1)"
-	// for "$x += 1", built from the tokens of both sides.
+	// Compound assignment: the expression "target op (rhs)",
+	// e.g. "$x + (1)" for "$x += 1", built from the tokens of both sides.
 	bool parse_compound(const wstring *target, const wstring *op, const wstring *rhs, const wstring *ini_namespace, CommandListScope *scope);
 	float evaluate(CommandListState *state, HackerDevice *device=NULL);
 	bool static_evaluate(float *ret, HackerDevice *device=NULL, bool evaluate_variables=false);
