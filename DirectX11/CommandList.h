@@ -1324,6 +1324,48 @@ enum class BatchDirection {
 	Fetch,
 };
 
+// A resource and how to read it: the view it came from,
+// plus the buffer layout that neither of them always knows on its own.
+// A structured buffer's stride comes from the resource,
+// a typed buffer's from the view's format,
+// a constant buffer's region from the call that bound it.
+// The copy pipeline passes all of this around as one value:
+// every stage either forwards it untouched, or fills in what was still unknown.
+struct ResourceCopyInfo {
+	ID3D11Resource *resource = nullptr;
+	ID3D11View *view = nullptr;
+	UINT stride = 0;
+	UINT offset = 0; // In bytes
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	UINT size = 0;   // In bytes
+
+	ResourceCopyInfo() {}
+	ResourceCopyInfo(ID3D11Resource *resource, ID3D11View *view) :
+		resource(resource), view(view)
+	{}
+
+	// Adopts the layout of the other side of the copy;
+	// keeps the resource, view and size of this one:
+	void TakeLayoutFrom(const ResourceCopyInfo &other)
+	{
+		stride = other.stride;
+		offset = other.offset;
+		format = other.format;
+	}
+};
+
+// Where a copy keeps the resource and view it creates between runs.
+// Normally they live in the ResourceCopyOperation, so each line gets its own.
+// A copy to a custom resource caches them on the custom resource instead,
+// so that several lines copying to the same destination share one resource.
+struct ResourceCopyCache {
+	CustomResource *custom_resource = nullptr; // Only a custom resource destination has one
+	ID3D11Resource **resource = nullptr;
+	ID3D11Device **device = nullptr;           // Only a custom resource records it
+	ResourcePool *pool = nullptr;
+	ID3D11View **view = nullptr;
+};
+
 class ResourceCopyOperation : public CommandListCommand {
 public:
 	ResourceCopyTarget src;
@@ -1341,11 +1383,11 @@ public:
 	ResourceCopyOperation();
 	~ResourceCopyOperation();
 
-	void CopyResourceToResource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
-	void CopyResourceToPool(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	void CopyResourceToResource(CommandListState* state, const ResourceCopyInfo& src_info);
+	void CopyResourceToPool(CommandListState* state, const ResourceCopyInfo& src_info);
 	// Copies a resolved source to the destination,
 	// then releases what the caller got from GetResource():
-	void CopyResolvedSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
+	void CopyResolvedSource(CommandListState* state, ResourceCopyInfo& src_info);
 
 	void run(CommandListState*) override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
@@ -1357,8 +1399,17 @@ public:
 	virtual bool IsBatchable() const { return true; }
 
 private:
-	void CopyResourceToTarget(CommandListState* state, ResourceCopyTarget& dst_target, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
-	void SetOrDeferResource(CommandListState* state, ResourceCopyTarget& dst_target, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
+	// src_info by value: each destination refines its own copy of it.
+	void CopyResourceToTarget(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo src_info);
+
+	// The stages of CopyResourceToTarget(), in the order it runs them:
+	bool PrepareDestination(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, ResourceCopyCache* cache);
+	bool WithinCopyBudget(CommandListState* state, CustomResource* custom_resource);
+	void LogBindFlags(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyCache& cache, const ResourceCopyInfo& src_info);
+	bool CopyToCachedResource(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info);
+	void ReferenceSource(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info);
+	void BindCopyResult(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyInfo& src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info);
+	void SetOrDeferResource(CommandListState* state, ResourceCopyTarget& dst_target, const ResourceCopyInfo& binding);
 };
 
 // Adjacent resource copies between a contiguous range of shader resource
@@ -1520,7 +1571,7 @@ class SlotFilterOperation : public ResourceCopyOperation
 public:
 	static constexpr UINT SLOT_COUNT = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
 
-	void ReplaceBestMatchingTextures(CommandListState* state, ID3D11Resource* source_resource, ID3D11View* source_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, const std::array<uint8_t, SLOT_COUNT>& distances, unsigned best_distance);
+	void ReplaceBestMatchingTextures(CommandListState* state, const ResourceCopyInfo& source_info, const std::array<uint8_t, SLOT_COUNT>& distances, unsigned best_distance);
 
 	void OverrideMatchingTextures(CommandListState* state);
 
