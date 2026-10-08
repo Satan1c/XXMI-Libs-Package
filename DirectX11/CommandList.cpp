@@ -10616,6 +10616,7 @@ float ResourceCopyTarget::GetResourceStride(CommandListState* state)
 					return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 				}
 			}
+			break;
 		}
 		case ResourceCopyTargetType::CONSTANT_BUFFER:
 		{
