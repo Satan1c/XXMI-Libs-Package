@@ -1168,13 +1168,7 @@ public:
 			DXGI_FORMAT *format,
 			UINT *buf_size,
 			ResourceCopyTarget *dst=NULL);
-	void SetResource(CommandListState *state,
-			ID3D11Resource *res,
-			ID3D11View *view,
-			UINT stride,
-			UINT offset,
-			DXGI_FORMAT format,
-			UINT buf_size);
+	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 
 	void FindTextureOverrides(
 			CommandListState *state,
