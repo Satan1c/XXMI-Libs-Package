@@ -10598,610 +10598,382 @@ namespace ResourcePropertyResult {
 	constexpr float NOT_A_TEXTURE       = -4.0f;
 }
 
-float ResourceCopyTarget::GetResourceStride(CommandListState* state)
-{
-	switch (type) {
-		case ResourceCopyTargetType::CUSTOM_RESOURCE: 
-		{
-			if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-				CustomResource* custom_resource = GetCustomResource(state);
-				if (custom_resource) {
-					if (custom_resource->override_stride != -1)
-						return (float)custom_resource->override_stride;
+// D3D11 keeps a resource's description behind a GetDesc() of its own per
+// dimension, with no field in common between the four. This reads whichever one
+// applies into the shape the <target>->Property accessors below ask about, so
+// that each of them is left with only the property it is for.
+struct ResourceDescInfo {
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	UINT width = 0;       // ByteWidth for a buffer
+	UINT height = 0;      // 1 for a 1D texture, 0 for a buffer
+	UINT array_size = 0;  // 1D and 2D textures only
+	UINT mip_levels = 0;  // Textures only
+	UINT stride = 0;      // StructureByteStride, buffers only
+	UINT bind_flags = 0;
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // Buffers have none
 
-					if (custom_resource->override_format != (DXGI_FORMAT)-1 &&
-						custom_resource->override_format != DXGI_FORMAT_UNKNOWN)
-						return (float)dxgi_format_size(custom_resource->override_format);
-				} else {
-					return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-				}
-			}
+	bool is_buffer() const { return dimension == D3D11_RESOURCE_DIMENSION_BUFFER; }
+	// A 3D texture has depth where the other two have an array size,
+	// so it is not one of these:
+	bool has_array() const
+	{
+		return dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D
+			|| dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+	}
+	bool is_texture() const
+	{
+		return has_array() || dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+	}
+};
+
+static ResourceDescInfo describe_resource(ID3D11Resource *resource)
+{
+	ResourceDescInfo info;
+
+	resource->GetType(&info.dimension);
+
+	switch (info.dimension) {
+		case D3D11_RESOURCE_DIMENSION_BUFFER:
+		{
+			D3D11_BUFFER_DESC desc;
+			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+			info.width = desc.ByteWidth;
+			info.stride = desc.StructureByteStride;
+			info.bind_flags = desc.BindFlags;
 			break;
 		}
-		case ResourceCopyTargetType::CONSTANT_BUFFER:
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 		{
-			// Constant Buffers have fixed stride of 16 bytes (4 x 32-bit values).
-			return 16.0f;
+			D3D11_TEXTURE1D_DESC desc;
+			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
+			info.width = desc.Width;
+			info.height = 1;
+			info.array_size = desc.ArraySize;
+			info.mip_levels = desc.MipLevels;
+			info.bind_flags = desc.BindFlags;
+			info.format = desc.Format;
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+		{
+			D3D11_TEXTURE2D_DESC desc;
+			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+			info.width = desc.Width;
+			info.height = desc.Height;
+			info.array_size = desc.ArraySize;
+			info.mip_levels = desc.MipLevels;
+			info.bind_flags = desc.BindFlags;
+			info.format = desc.Format;
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+		{
+			D3D11_TEXTURE3D_DESC desc;
+			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
+			info.width = desc.Width;
+			info.height = desc.Height;
+			info.mip_levels = desc.MipLevels;
+			info.bind_flags = desc.BindFlags;
+			info.format = desc.Format;
+			break;
 		}
 	}
 
-	UINT stride = 0;
+	return info;
+}
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, &stride, nullptr, nullptr, nullptr);
+// A custom resource answers for a property out of its own metadata, which lets
+// an ini line read back what it asked for before the resource exists. Returns
+// false for a pool element that is not assigned yet: it has no metadata to
+// answer from, and must not reach GetResource(), whose CUSTOM_RESOURCE case
+// dereferences it without a null check.
+bool ResourceCopyTarget::PropertyCustomResource(CommandListState *state, CustomResource **custom_resource)
+{
+	*custom_resource = NULL;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
+	if (type != ResourceCopyTargetType::CUSTOM_RESOURCE)
+		return true;
 
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		if (stride != 0) {
-			ret = (float)stride;
-		} else {
-			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-			resource->GetType(&dimension);
+	*custom_resource = GetCustomResource(state);
+	return *custom_resource != NULL;
+}
 
-			if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
-				ret = ResourcePropertyResult::NOT_A_BUFFER;
-			} else {
-				auto buf = static_cast<ID3D11Buffer*>(resource);
+// The bookkeeping every <target>->Property accessor shares: resolve the target,
+// read one property off the resource, then release it and any view it came with.
+// A target with nothing bound reads as RESOURCE_NOT_FOUND, and read() returns
+// UNKNOWN for a resource that cannot answer for the property.
+template <typename ReadProperty>
+float ResourceCopyTarget::ResourceProperty(CommandListState *state, ReadProperty read)
+{
+	ResourceCopyInfo info;
 
-				D3D11_BUFFER_DESC desc;
-				buf->GetDesc(&desc);
+	info.resource = GetResource(state, &info.view, &info.stride, &info.offset, &info.format, &info.size);
 
-				if (desc.StructureByteStride != 0)
-					ret = (float)desc.StructureByteStride;
-			}
-		}
-
-		resource->Release();
+	float ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
+	if (info.resource) {
+		ret = read(info);
+		info.resource->Release();
 	}
 
-	if (view)
-		view->Release();
+	if (info.view)
+		info.view->Release();
 
 	return ret;
+}
+
+// Where in the buffer the slot's contents start. A vertex or index buffer is
+// offset by the draw call as well as by the bind, which is what the call_info
+// is for; a constant buffer carries only the offset it was bound at.
+UINT ResourceCopyTarget::BufferRegionOffset(CommandListState *state, const ResourceCopyInfo &info)
+{
+	switch (type) {
+		case ResourceCopyTargetType::VERTEX_BUFFER:
+			return GetVertexBufferRegionOffset(info.stride, state->call_info, info.offset);
+		case ResourceCopyTargetType::INDEX_BUFFER:
+			return GetIndexBufferRegionOffset(info.format, state->call_info, info.offset);
+		case ResourceCopyTargetType::CONSTANT_BUFFER:
+			return info.offset;
+	}
+
+	return 0;
+}
+
+// Every <target>->Property below reads from the resource description rather than
+// from the view, so for a texture array or a mip level SRV they report the whole
+// resource, not the part the view exposes.
+
+float ResourceCopyTarget::GetResourceStride(CommandListState* state)
+{
+	// Constant Buffers have fixed stride of 16 bytes (4 x 32-bit values).
+	if (type == ResourceCopyTargetType::CONSTANT_BUFFER)
+		return 16.0f;
+
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
+
+	if (custom_resource) {
+		if (custom_resource->override_stride != -1)
+			return (float)custom_resource->override_stride;
+
+		if (custom_resource->override_format != (DXGI_FORMAT)-1 &&
+			custom_resource->override_format != DXGI_FORMAT_UNKNOWN)
+			return (float)dxgi_format_size(custom_resource->override_format);
+	}
+
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		if (info.stride)
+			return (float)info.stride;
+
+		ResourceDescInfo desc = describe_resource(info.resource);
+		if (!desc.is_buffer())
+			return ResourcePropertyResult::NOT_A_BUFFER;
+
+		// A buffer that is not structured has no stride of its own to report:
+		return desc.stride ? (float)desc.stride : ResourcePropertyResult::UNKNOWN;
+	});
 }
 
 float ResourceCopyTarget::GetResourceFormat(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->override_format != (DXGI_FORMAT)-1 &&
-				custom_resource->override_format != DXGI_FORMAT_UNKNOWN)
-				return (float)custom_resource->override_format;
-			if (custom_resource->format != DXGI_FORMAT_UNKNOWN)
-				return (float)custom_resource->format;
-		} else {
-			// GetResource()'s CUSTOM_RESOURCE branch dereferences
-			// GetCustomResource() without a null check, so bail out for an
-			// unassigned pool resource instead of falling through.
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
+
+	if (custom_resource) {
+		if (custom_resource->override_format != (DXGI_FORMAT)-1 &&
+			custom_resource->override_format != DXGI_FORMAT_UNKNOWN)
+			return (float)custom_resource->override_format;
+
+		if (custom_resource->format != DXGI_FORMAT_UNKNOWN)
+			return (float)custom_resource->format;
 	}
 
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	// The slot's own format first, then the view's, then the resource's:
+	return ResourceProperty(state, [this](const ResourceCopyInfo &info) {
+		DXGI_FORMAT format = info.format;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, &format, nullptr);
-
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-
-		if (format == DXGI_FORMAT_UNKNOWN && view)
-		{
-			const ViewInfo view_info = GetViewInfo(type, view);
-			format = view_info.format;
-		}
+		if (format == DXGI_FORMAT_UNKNOWN && info.view)
+			format = GetViewInfo(type, info.view).format;
 
 		if (format == DXGI_FORMAT_UNKNOWN)
-		{
-			D3D11_RESOURCE_DIMENSION dimension;
-			resource->GetType(&dimension);
+			format = describe_resource(info.resource).format;
 
-			format = GetTextureFormat(resource, dimension);
-		}
-
-		if (format != DXGI_FORMAT_UNKNOWN)
-			ret = (float)format;
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
-}
-
-// Returns the requested extent (0 = width, 1 = height) of a texture resource,
-// or NOT_A_TEXTURE for buffers. Uses the resource description, so for texture
-// arrays / mip-level SRVs this is the full resource dimension, not the view's.
-static float GetResourceExtent(ID3D11Resource* resource, int extent)
-{
-	D3D11_RESOURCE_DIMENSION dimension;
-	resource->GetType(&dimension);
-
-	switch (dimension) {
-		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
-			D3D11_TEXTURE1D_DESC desc;
-			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-			return (extent == 0) ? (float)desc.Width : 1.0f;
-		}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
-			D3D11_TEXTURE2D_DESC desc;
-			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-			return (extent == 0) ? (float)desc.Width : (float)desc.Height;
-		}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
-			D3D11_TEXTURE3D_DESC desc;
-			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-			return (extent == 0) ? (float)desc.Width : (float)desc.Height;
-		}
-	}
-
-	return ResourcePropertyResult::NOT_A_TEXTURE;
+		return format == DXGI_FORMAT_UNKNOWN ? ResourcePropertyResult::UNKNOWN : (float)format;
+	});
 }
 
 float ResourceCopyTarget::GetResourceWidth(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->override_width != -1)
-				return (float)custom_resource->override_width;
-		} else {
-			// GetResource()'s CUSTOM_RESOURCE branch dereferences
-			// GetCustomResource() without a null check, so bail out for an
-			// unassigned pool resource instead of falling through.
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
-	}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	if (custom_resource && custom_resource->override_width != -1)
+		return (float)custom_resource->override_width;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		ret = GetResourceExtent(resource, 0);
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		ResourceDescInfo desc = describe_resource(info.resource);
+		return desc.is_texture() ? (float)desc.width : ResourcePropertyResult::NOT_A_TEXTURE;
+	});
 }
 
 float ResourceCopyTarget::GetResourceHeight(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->override_height != -1)
-				return (float)custom_resource->override_height;
-		} else {
-			// GetResource()'s CUSTOM_RESOURCE branch dereferences
-			// GetCustomResource() without a null check, so bail out for an
-			// unassigned pool resource instead of falling through.
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
-	}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	if (custom_resource && custom_resource->override_height != -1)
+		return (float)custom_resource->override_height;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		ret = GetResourceExtent(resource, 1);
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		ResourceDescInfo desc = describe_resource(info.resource);
+		return desc.is_texture() ? (float)desc.height : ResourcePropertyResult::NOT_A_TEXTURE;
+	});
 }
 
-// Returns the array dimension of a texture resource, or NOT_A_TEXTURE for buffers.
-// Uses the resource description, so for texture arrays / mip-level SRVs this is the full resource ArraySize, not the view's.
 float ResourceCopyTarget::GetResourceArray(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->override_array != -1)
-				return (float)custom_resource->override_array;
-		} else {
-			// GetResource()'s CUSTOM_RESOURCE branch dereferences without null check,
-			// so bail out for an unassigned pool resource.
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
-	}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	if (custom_resource && custom_resource->override_array != -1)
+		return (float)custom_resource->override_array;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		D3D11_RESOURCE_DIMENSION dimension;
-		resource->GetType(&dimension);
-
-		switch (dimension) {
-			case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
-				D3D11_TEXTURE1D_DESC desc;
-				static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-				ret = (float)desc.ArraySize;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
-				D3D11_TEXTURE2D_DESC desc;
-				static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-				ret = (float)desc.ArraySize;
-				break;
-			}
-		}
-
-		if (ret == ResourcePropertyResult::UNKNOWN) {
-			ret = ResourcePropertyResult::NOT_A_TEXTURE;
-		}
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		// A 3D texture has depth where the others have an array, and reads as
+		// NOT_A_TEXTURE here rather than reporting one:
+		ResourceDescInfo desc = describe_resource(info.resource);
+		return desc.has_array() && desc.array_size
+			? (float)desc.array_size : ResourcePropertyResult::NOT_A_TEXTURE;
+	});
 }
 
-// Returns the mipmap level count of a texture resource, or NOT_A_TEXTURE for buffers.
-// Uses the resource description, so for mip-level SRVs this is the full resource MipLevels, not the view's.
 float ResourceCopyTarget::GetResourceMips(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->override_mips != -1)
-				return (float)custom_resource->override_mips;
-		} else {
-			// GetResource()'s CUSTOM_RESOURCE branch dereferences without null check,
-			// so bail out for an unassigned pool resource.
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
-	}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	if (custom_resource && custom_resource->override_mips != -1)
+		return (float)custom_resource->override_mips;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		D3D11_RESOURCE_DIMENSION dimension;
-		resource->GetType(&dimension);
-
-		switch (dimension) {
-			case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
-				D3D11_TEXTURE1D_DESC desc;
-				static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-				ret = (float)desc.MipLevels;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
-				D3D11_TEXTURE2D_DESC desc;
-				static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-				ret = (float)desc.MipLevels;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
-				D3D11_TEXTURE3D_DESC desc;
-				static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-				ret = (float)desc.MipLevels;
-				break;
-			}
-		}
-
-		if (ret == ResourcePropertyResult::UNKNOWN) {
-			ret = ResourcePropertyResult::NOT_A_TEXTURE;
-		}
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		ResourceDescInfo desc = describe_resource(info.resource);
+		return desc.is_texture() && desc.mip_levels
+			? (float)desc.mip_levels : ResourcePropertyResult::NOT_A_TEXTURE;
+	});
 }
 
-// Returns the D3D11_BIND_FLAGs of a resource.
 D3D11_BIND_FLAG ResourceCopyTarget::GetResourceBindFlags(CommandListState *state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			return custom_resource->bind_flags;
-		}
-		// GetResource()'s CUSTOM_RESOURCE branch dereferences without null check,
-		// so bail out for an unassigned pool resource.
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
 		return (D3D11_BIND_FLAG)0;
-	}
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	if (custom_resource)
+		return custom_resource->bind_flags;
+
+	// Not through ResourceProperty(): bind flags are not a float, and a target
+	// with nothing bound simply has none, which 0 already says.
+	ResourceCopyInfo info;
+	info.resource = GetResource(state, &info.view, &info.stride, &info.offset, &info.format, &info.size);
 
 	D3D11_BIND_FLAG ret = (D3D11_BIND_FLAG)0;
-
-	if (resource) {
-		D3D11_RESOURCE_DIMENSION dimension;
-		resource->GetType(&dimension);
-
-		switch (dimension) {
-			case D3D11_RESOURCE_DIMENSION_BUFFER: {
-				D3D11_BUFFER_DESC desc;
-				static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
-				ret = (D3D11_BIND_FLAG)desc.BindFlags;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
-				D3D11_TEXTURE1D_DESC desc;
-				static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-				ret = (D3D11_BIND_FLAG)desc.BindFlags;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
-				D3D11_TEXTURE2D_DESC desc;
-				static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-				ret = (D3D11_BIND_FLAG)desc.BindFlags;
-				break;
-			}
-			case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
-				D3D11_TEXTURE3D_DESC desc;
-				static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-				ret = (D3D11_BIND_FLAG)desc.BindFlags;
-				break;
-			}
-		}
-		resource->Release();
+	if (info.resource) {
+		ret = (D3D11_BIND_FLAG)describe_resource(info.resource).bind_flags;
+		info.resource->Release();
 	}
 
-	if (view)
-		view->Release();
+	if (info.view)
+		info.view->Release();
 
 	return ret;
 }
 
 float ResourceCopyTarget::GetResourceSize(CommandListState* state)
 {
-	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
-		CustomResource* custom_resource = GetCustomResource(state);
-		if (custom_resource) {
-			if (custom_resource->buf_size > 0)
-				return (float)custom_resource->buf_size;
-		} else {
-			return ResourcePropertyResult::RESOURCE_NOT_FOUND;
-		}
-	}
+	CustomResource *custom_resource;
+	if (!PropertyCustomResource(state, &custom_resource))
+		return ResourcePropertyResult::RESOURCE_NOT_FOUND;
 
-	UINT size = 0;
+	if (custom_resource && custom_resource->buf_size > 0)
+		return (float)custom_resource->buf_size;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, &size);
+	return ResourceProperty(state, [](const ResourceCopyInfo &info) {
+		if (info.size)
+			return (float)info.size;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
+		ResourceDescInfo desc = describe_resource(info.resource);
+		if (!desc.is_buffer())
+			return ResourcePropertyResult::NOT_A_BUFFER;
 
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	} else {
-		if (size > 0) {
-			ret = (float)size;
-		} else {
-			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-			resource->GetType(&dimension);
-
-			if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
-				ret = ResourcePropertyResult::NOT_A_BUFFER;
-			} else {
-				auto buf = static_cast<ID3D11Buffer*>(resource);
-
-				D3D11_BUFFER_DESC desc;
-				buf->GetDesc(&desc);
-
-				if (desc.ByteWidth != 0)
-					ret = (float)desc.ByteWidth;
-			}
-		}
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+		return desc.width ? (float)desc.width : ResourcePropertyResult::UNKNOWN;
+	});
 }
 
 float ResourceCopyTarget::GetResourceOffset(CommandListState* state)
 {
-	UINT stride = 0, offset = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	return ResourceProperty(state, [&](const ResourceCopyInfo &info) {
+		if (!describe_resource(info.resource).is_buffer())
+			return ResourcePropertyResult::NOT_A_BUFFER;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, &stride, &offset, &format, nullptr);
-
-	float ret = ResourcePropertyResult::UNKNOWN;
-
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	}
-	else {
-
-		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-		resource->GetType(&dimension);
-
-		if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
-			ret = ResourcePropertyResult::NOT_A_BUFFER;
-		}
-		else {
-			auto buf = static_cast<ID3D11Buffer*>(resource);
-
-			switch (this->type) {
+		switch (type) {
 			case ResourceCopyTargetType::VERTEX_BUFFER:
-				ret = (float)GetVertexBufferRegionOffset(stride, state->call_info, offset);
-				break;
-
 			case ResourceCopyTargetType::INDEX_BUFFER:
-				ret = (float)GetIndexBufferRegionOffset(format, state->call_info, offset);
-				break;
-
 			case ResourceCopyTargetType::CONSTANT_BUFFER:
-				ret = (float)offset;
-				break;
-			}
+				return (float)BufferRegionOffset(state, info);
 		}
-		resource->Release();
-	}
 
-	if (view)
-		view->Release();
-
-	return ret;
+		// Every other buffer slot is bound whole:
+		return ResourcePropertyResult::UNKNOWN;
+	});
 }
 
 float ResourceCopyTarget::GetResourceRegionHash(CommandListState* state)
 {
-	UINT stride = 0, offset = 0, size = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	return ResourceProperty(state, [&](const ResourceCopyInfo &info) {
+		if (!describe_resource(info.resource).is_buffer())
+			return ResourcePropertyResult::NOT_A_BUFFER;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, &stride, &offset, &format, &size);
+		UINT region_offset = BufferRegionOffset(state, info) + (UINT)member_args[0].GetValue(state);
+		UINT region_size = (UINT)member_args[1].GetValue(state);
 
-	float ret = ResourcePropertyResult::UNKNOWN;
+		uint32_t region_hash = GetRegionHash(state->mHackerContext, static_cast<ID3D11Buffer*>(info.resource),
+				region_offset, region_size, GetCustomResource(state));
 
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	}
-	else {
-		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-		resource->GetType(&dimension);
+		//LogOverlay(LOG_INFO, "^- hash=%08lx offset=%d size=%d\n", region_hash, region_offset, region_size);
 
-		if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
-			ret = ResourcePropertyResult::NOT_A_BUFFER;
-		}
-		else {
-			auto buf = static_cast<ID3D11Buffer*>(resource);
-
-			UINT region_offset = 0;
-
-			switch (this->type) {
-			case ResourceCopyTargetType::VERTEX_BUFFER:
-				region_offset = GetVertexBufferRegionOffset(stride, state->call_info, offset);
-				break;
-
-			case ResourceCopyTargetType::INDEX_BUFFER:
-				region_offset = GetIndexBufferRegionOffset(format, state->call_info, offset);
-				break;
-
-			case ResourceCopyTargetType::CONSTANT_BUFFER:
-				region_offset = offset;
-				break;
-			}
-
-			region_offset += (UINT)member_args[0].GetValue(state);
-
-			UINT region_size = (UINT)member_args[1].GetValue(state);
-
-			uint32_t region_hash = GetRegionHash(state->mHackerContext, buf, region_offset, region_size, GetCustomResource(state));
-
-			if (region_hash)
-				ret = EncodeFloat30(HashUnsigned32(region_hash));
-
-			//LogOverlay(LOG_INFO, "^- hash=%08lx offset=%d (arg0=%d) size=%d (arg1=%d)\n", region_hash, region_offset, (UINT)member_args[0].GetValue(), region_size, (UINT)member_args[1].GetValue());
-		}
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+		return region_hash ? EncodeFloat30(HashUnsigned32(region_hash)) : ResourcePropertyResult::UNKNOWN;
+	});
 }
 
 float ResourceCopyTarget::GetResourceSpatialHash(CommandListState* state)
 {
-	UINT stride = 0, offset = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+	return ResourceProperty(state, [&](const ResourceCopyInfo &info) {
+		if (!describe_resource(info.resource).is_buffer())
+			return ResourcePropertyResult::NOT_A_BUFFER;
 
-	ID3D11View* view = nullptr;
-	ID3D11Resource* resource = GetResource(state, &view, &stride, &offset, &format, nullptr);
+		UINT region_offset = BufferRegionOffset(state, info);
+		// The cell coordinates below are in floats, not bytes, so a constant
+		// buffer's byte offset has to come down to the same unit:
+		if (type == ResourceCopyTargetType::CONSTANT_BUFFER)
+			region_offset /= 4;
 
-	float ret = ResourcePropertyResult::UNKNOWN;
+		UINT offset_x = region_offset + (UINT)member_args[0].GetValue(state);
+		UINT offset_y = region_offset + (UINT)member_args[1].GetValue(state);
+		UINT offset_z = region_offset + (UINT)member_args[2].GetValue(state);
+		float cell_size = member_args[3].GetValue(state);
 
-	if (!resource) {
-		ret = ResourcePropertyResult::RESOURCE_NOT_FOUND;
-	}
-	else {
-		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-		resource->GetType(&dimension);
+		uint32_t spatial_hash = GetSpatialHash(state->mHackerContext, static_cast<ID3D11Buffer*>(info.resource),
+				offset_x, offset_y, offset_z, cell_size, GetCustomResource(state));
 
-		if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
-			ret = ResourcePropertyResult::NOT_A_BUFFER;
-		}
-		else {
-			auto buf = static_cast<ID3D11Buffer*>(resource);
+		//LogOverlay(LOG_INFO, "GetResourceSpatialHash hash=%08lx x=%d y=%d z=%d\n", spatial_hash, offset_x, offset_y, offset_z);
 
-			UINT region_offset = 0;
-
-			switch (this->type) {
-			case ResourceCopyTargetType::VERTEX_BUFFER:
-				region_offset = GetVertexBufferRegionOffset(stride, state->call_info, offset);
-				break;
-
-			case ResourceCopyTargetType::INDEX_BUFFER:
-				region_offset = GetIndexBufferRegionOffset(format, state->call_info, offset);
-				break;
-
-			case ResourceCopyTargetType::CONSTANT_BUFFER:
-				region_offset = offset / 4;
-				break;
-			}
-
-			UINT offset_x = region_offset + (UINT)member_args[0].GetValue(state);
-			UINT offset_y = region_offset + (UINT)member_args[1].GetValue(state);
-			UINT offset_z = region_offset + (UINT)member_args[2].GetValue(state);
-			float cell_size = member_args[3].GetValue(state);
-
-			uint32_t spatial_hash = GetSpatialHash(state->mHackerContext, buf, offset_x, offset_y, offset_z, cell_size, GetCustomResource(state));
-
-			if (spatial_hash)
-				ret = BitCastToFloat(spatial_hash);
-
-			//LogOverlay(LOG_INFO, "GetResourceSpatialHash hash=%08lx x=%.3f y=%.3f z=%.3f\n", spatial_hash, member_args[0].GetValue(), member_args[1].GetValue(), member_args[2].GetValue());
-		}
-
-		resource->Release();
-	}
-
-	if (view)
-		view->Release();
-
-	return ret;
+		return spatial_hash ? BitCastToFloat(spatial_hash) : ResourcePropertyResult::UNKNOWN;
+	});
 }
 
 float ResourceCopyTarget::GetPoolElementLastFrame(CommandListState* state)
