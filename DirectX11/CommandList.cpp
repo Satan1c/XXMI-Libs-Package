@@ -448,6 +448,10 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 	state.view = view;
 	state.post = post;
 
+	// Every resource this run reads is resolved once, however many conditions
+	// and properties ask for it, until something binds:
+	ResolvedResourceScope resolved(&state);
+
 	if (!post && !state.input_layout_overrides.empty())
 		UpdateInputLayout(command_list->ini_section.c_str(), &state);
 
@@ -3087,47 +3091,7 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 	switch (texture_filter_target.evaluation_mode)
 	{
 		case ResourceCopyTargetEvaluationMode::RESOURCE:
-		{
-			TextureOverrideMatches matches;
-			TextureOverrideMatches::reverse_iterator rit;
-			bool resource_found;
-
-			texture_filter_target.FindTextureOverrides(state, &resource_found, &matches);
-
-			// If there is no resource bound we want to return a special value that
-			// is distinct from simply not finding a texture override section. For
-			// backwards compatibility we use negative zero -0.0, because any
-			// existing fixes that test for zero/non-zero to check if a matching
-			// [TextureOverride] is present would expect an unbound texture to
-			// never have a hash and therefore be equal to 0, and -0.0 *is* equal
-			// to +0, so these will continue to work. To explicitly test for an
-			// unassigned resource, use this HLSL to reinterpret the values as
-			// integers and check the sign bit:
-			//
-			// if (asint(IniParams[0].x) == asint(-0.0)) { ... }
-			//
-			if (!resource_found)
-				return -0.0f;
-
-			// A resource was bound, but no matching texture override was found:
-			if (matches.empty())
-				return 0.0f;
-
-			// If there are multiple matches, we want the filter_index with the
-			// highest priority, which will be the last in the list that has a
-			// filter index. In the future we may also want a namespaced version of
-			// this (and checktextureoverride) to limit the check to sections
-			// appearing in the same namespace or with a given prefix (but we don't
-			// want to do string processing on the namespace here - the candidates
-			// should already be narrowed down during ini parsing):
-			for (rit = matches.rbegin(); rit != matches.rend(); rit++) {
-				if ((*rit)->filter_index != FLT_MAX)
-					return (*rit)->filter_index;
-			}
-
-			// No match had a filter_index, but there was at least one match:
-			return 1.0f;
-		}
+			return texture_filter_target.TextureFilterIndex(state);
 
 		case ResourceCopyTargetEvaluationMode::VARIABLE:
 			return texture_filter_target.GetPoolVariable(state, false)->fval;
@@ -5650,10 +5614,6 @@ bool CommandListExpression::parse_compound(const wstring *target, const wstring 
 
 float CommandListExpression::evaluate(CommandListState *state, HackerDevice *device)
 {
-	// Every property read of one resource in this expression shares a single
-	// resolve of it:
-	ResolvedResourceScope resolved(state);
-
 	return evaluatable->evaluate(state, device);
 }
 
@@ -9974,7 +9934,22 @@ static ID3D11Resource *get_back_buffer(CommandListState *state, bool fake, const
 	return res;
 }
 
-ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst)
+// Drops every resolve this run has made. Called by anything that binds, because
+// a resolve says what a slot held at the moment it was read: after a bind, a
+// cached one would answer for the resource that was there before it.
+static void invalidate_resolved_resources(CommandListState *state)
+{
+	if (!state)
+		return;
+
+	for (unsigned i = 0; i < state->resolved_count; i++)
+		state->resolved_resources[i].Release();
+
+	state->resolved_count = 0;
+}
+
+ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst,
+		CustomResource *resolved_custom)
 {
 	HackerDevice *mHackerDevice = state->mHackerDevice;
 	ID3D11Device1 *mOrigDevice1 = state->mOrigDevice1;
@@ -10051,7 +10026,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, Resourc
 
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
 		{
-			CustomResource* custom_resource = GetCustomResource(state);
+			CustomResource* custom_resource = resolved_custom ? resolved_custom : GetCustomResource(state);
 
 			if (!custom_resource)
 				return nullptr;
@@ -10093,7 +10068,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, Resourc
 
 	case ResourceCopyTargetType::THIS_RESOURCE:
 		if (state->this_target)
-			return state->this_target->GetResource(state, info, dst);
+			return state->this_target->GetResource(state, info, dst, resolved_custom);
 
 		if (state->resource)
 			return share_resource(*state->resource, state->view, info);
@@ -10235,6 +10210,10 @@ void ResourceCopyTarget::StoreInCustomResource(CommandListState *state, const Re
 void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopyInfo &binding)
 {
 	ID3D11DeviceContext1 *mOrigContext1 = state->mOrigContext1;
+
+	// Whatever a resolve made earlier in this run says about a slot, it no
+	// longer says it after this:
+	invalidate_resolved_resources(state);
 	ID3D11Buffer *buf = NULL;
 	ID3D11ShaderResourceView *resource_view = NULL;
 	ID3D11UnorderedAccessView *unordered_view = NULL;
@@ -10408,14 +10387,24 @@ D3D11_BIND_FLAG ResourceCopyTarget::BindFlags(CommandListState *state, D3D11_RES
 
 void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *resource_found, TextureOverrideMatches *matches)
 {
-	ResourceCopyInfo info;
-	ID3D11Resource* resource = GetResource(state, &info);
+	ResolvedResource local;
+	ResolvedResource *resolved = ResolveForProperty(state, &local);
 
 	if (resource_found)
-		*resource_found = !!resource;
+		*resource_found = !!resolved->info.resource;
 
-	if (!resource)
-		return;
+	if (resolved->info.resource)
+		MatchTextureOverrides(state, resolved->info, matches);
+
+	if (resolved == &local)
+		local.Release();
+}
+
+// What `o0 == 1234` compares, and what CheckTextureOverride runs: the
+// [TextureOverride] sections matching a resource that has already been resolved.
+void ResourceCopyTarget::MatchTextureOverrides(CommandListState *state, const ResourceCopyInfo &info, TextureOverrideMatches *matches)
+{
+	ID3D11Resource *resource = info.resource;
 
 	// For vertex and index buffers the game may pack multiple meshes into
 	// one buffer and bind them at different offsets. In that case the base
@@ -10496,10 +10485,69 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 	}
 
 	//COMMAND_LIST_LOG(state, "  found texture hash = %08llx\n", hash);
+}
 
-	resource->Release();
-	if (info.view)
-		info.view->Release();
+// `o0 == 1234`: the filter_index of the [TextureOverride] matching whatever this
+// target holds. Worked out on the first comparison of a run and reused by the
+// rest, since the matching costs a handle info lookup, the global lock and a walk
+// of the resource's candidates.
+float ResourceCopyTarget::TextureFilterIndex(CommandListState *state)
+{
+	ResolvedResource local;
+	ResolvedResource *resolved = ResolveForProperty(state, &local);
+	TextureOverrideMatches matches;
+	TextureOverrideMatches::reverse_iterator rit;
+	float filter_index;
+
+	if (resolved->FilterIndex(&filter_index))
+		return filter_index;
+
+	// If there is no resource bound we want to return a special value that
+	// is distinct from simply not finding a texture override section. For
+	// backwards compatibility we use negative zero -0.0, because any
+	// existing fixes that test for zero/non-zero to check if a matching
+	// [TextureOverride] is present would expect an unbound texture to
+	// never have a hash and therefore be equal to 0, and -0.0 *is* equal
+	// to +0, so these will continue to work. To explicitly test for an
+	// unassigned resource, use this HLSL to reinterpret the values as
+	// integers and check the sign bit:
+	//
+	// if (asint(IniParams[0].x) == asint(-0.0)) { ... }
+	//
+	filter_index = -0.0f;
+
+	if (resolved->info.resource) {
+		MatchTextureOverrides(state, resolved->info, &matches);
+
+		// A resource was bound, but no matching texture override was found:
+		filter_index = 0.0f;
+
+		// If there are multiple matches, we want the filter_index with the
+		// highest priority, which will be the last in the list that has a
+		// filter index. In the future we may also want a namespaced version of
+		// this (and checktextureoverride) to limit the check to sections
+		// appearing in the same namespace or with a given prefix (but we don't
+		// want to do string processing on the namespace here - the candidates
+		// should already be narrowed down during ini parsing):
+		if (!matches.empty()) {
+			// No match had a filter_index, but there was at least one match:
+			filter_index = 1.0f;
+
+			for (rit = matches.rbegin(); rit != matches.rend(); rit++) {
+				if ((*rit)->filter_index != FLT_MAX) {
+					filter_index = (*rit)->filter_index;
+					break;
+				}
+			}
+		}
+	}
+
+	resolved->SetFilterIndex(filter_index);
+
+	if (resolved == &local)
+		local.Release();
+
+	return filter_index;
 }
 
 float ResourceCopyTarget::GetResourceId(CommandListState* state)
@@ -10610,6 +10658,21 @@ const ResourceDescInfo &ResolvedResource::Description()
 	return desc;
 }
 
+bool ResolvedResource::FilterIndex(float *filter_index) const
+{
+	if (!filtered)
+		return false;
+
+	*filter_index = filter;
+	return true;
+}
+
+void ResolvedResource::SetFilterIndex(float filter_index)
+{
+	filter = filter_index;
+	filtered = true;
+}
+
 void ResolvedResource::Release()
 {
 	if (info.resource)
@@ -10620,6 +10683,7 @@ void ResolvedResource::Release()
 	key = ResolvedResourceKey();
 	info = ResourceCopyInfo();
 	described = false;
+	filtered = false;
 }
 
 // A nested evaluation - a pool index, say - shares the cache the outermost one
@@ -10650,26 +10714,33 @@ ResolvedResourceScope::~ResolvedResourceScope()
 	owner->resolved_count = 0;
 }
 
-// Resolves the target for a property read. While an expression is being
-// evaluated, a resolve of the same resource made earlier in it is handed back
-// instead, and a new one is kept for the rest of it. `local` is where a resolve
-// goes when there is no cache to keep it in, and is the caller's to release.
+// Resolves the target for a property read or a filter index comparison. A
+// resolve of the same resource made earlier in this run is handed back instead,
+// and a new one is kept for the rest of the run. `local` is where a resolve goes
+// when there is no cache to keep it in, and is the caller's to release.
 ResolvedResource *ResourceCopyTarget::ResolveForProperty(CommandListState *state, ResolvedResource *local)
 {
 	ResolvedResource *entry = local;
+	CustomResource *custom_resource = NULL;
+	bool custom = (type == ResourceCopyTargetType::CUSTOM_RESOURCE
+			|| type == ResourceCopyTargetType::POOL);
 
-	// A slot or pool index given as an expression is left out: resolving it is
-	// GetResource()'s job, and asking for it here as well would evaluate that
-	// expression, and repeat anything it warns about, a second time. The back
-	// buffer is left out because holding a reference on it blocks
-	// ResizeBuffers(), which is what forbid_view_cache already says about it.
-	if (state && state->resolved_resources && !slot_expression
-			&& !pool_dynamic_index_expression && !forbid_view_cache) {
+	// Resolved here rather than inside GetResource(), so that a dynamic pool
+	// index is evaluated once and its element can go in the key:
+	if (custom)
+		custom_resource = GetCustomResource(state);
+
+	// A slot given as an expression is left out: resolving it is GetResource()'s
+	// job, and asking for it here as well would evaluate that expression, and
+	// repeat anything it warns about, a second time. The back buffer is left out
+	// because holding a reference on it blocks ResizeBuffers(), which is what
+	// forbid_view_cache already says about it.
+	if (state && state->resolved_resources && !slot_expression && !forbid_view_cache) {
 		ResolvedResourceKey key;
 		key.type = type;
 		key.shader_type = shader_type;
 		key.slot = slot;
-		key.custom_resource = static_custom_resource;
+		key.custom_resource = custom_resource;
 		key.pool = custom_resource_pool;
 
 		for (unsigned i = 0; i < state->resolved_count; i++) {
@@ -10683,7 +10754,7 @@ ResolvedResource *ResourceCopyTarget::ResolveForProperty(CommandListState *state
 		}
 	}
 
-	entry->info.resource = GetResource(state, &entry->info);
+	entry->info.resource = GetResource(state, &entry->info, NULL, custom_resource);
 	return entry;
 }
 
@@ -13320,6 +13391,9 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 static void SetSlotRange(CommandListState *state, ResourceCopyTarget &target, unsigned first, unsigned count, const SlotRangeBindings &bindings)
 {
 	ID3D11DeviceContext1 *context = state->mOrigContext1;
+
+	// As in SetResource(): a resolve describes what was bound before this.
+	invalidate_resolved_resources(state);
 	UINT cb_first[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 	UINT cb_counts[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 	bool cb_regions = false;
