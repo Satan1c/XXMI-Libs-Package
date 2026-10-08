@@ -1169,6 +1169,7 @@ public:
 			UINT *buf_size,
 			ResourceCopyTarget *dst=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
+	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
 	void FindTextureOverrides(
 			CommandListState *state,
