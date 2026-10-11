@@ -36,6 +36,9 @@
     <ProjectReference Include="..\DirectXTK\DirectXTK_Desktop_2017.vcxproj">
       <Project>{e0b52ae7-e160-4d32-bf3f-910b785e5a8e}</Project>
     </ProjectReference>
+    <ProjectReference Include="..\DirectXTK\Audio\DirectXTKAudio_Desktop_2017_Win8.vcxproj">
+      <Project>{4f150a30-cecb-49d1-8283-6a3f57438cf5}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\crc32c-hw-1.0.5\src\crc32c.cpp" />
@@ -66,6 +69,7 @@
     <ClCompile Include="Overlay.cpp" />
     <ClCompile Include="Override.cpp" />
     <ClCompile Include="profiling.cpp" />
+    <ClCompile Include="SoundEngine.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
   </ItemGroup>
@@ -101,6 +105,7 @@
     <ClInclude Include="CommandList.h" />
     <ClInclude Include="Override.h" />
     <ClInclude Include="profiling.h" />
+    <ClInclude Include="SoundEngine.h" />
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="ShaderRegex.h" />
     <ClInclude Include="..\vkeys.h" />
