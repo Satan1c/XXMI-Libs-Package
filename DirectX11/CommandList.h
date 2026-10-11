@@ -466,9 +466,9 @@ static EnumName_t<const wchar_t *, CustomResourceType> CustomResourceTypeNames[]
 };
 
 enum class CustomColorSpace {
-	DEFAULT = DirectX::WIC_LOADER_FLAGS::WIC_LOADER_DEFAULT,
-	SRGB    = DirectX::WIC_LOADER_FLAGS::WIC_LOADER_FORCE_SRGB,
-	LINEAR  = DirectX::WIC_LOADER_FLAGS::WIC_LOADER_IGNORE_SRGB,
+	DEFAULT,
+	SRGB,
+	LINEAR,
 };
 static EnumName_t<const wchar_t *, CustomColorSpace> CustomColorSpaceNames[] = {
 	{L"sRGB", CustomColorSpace::SRGB},
@@ -635,6 +635,7 @@ public:
 private:
 	bool HasPNGsRGBChunk(wstring filename);
 	DirectX::WIC_LOADER_FLAGS GetWICFlags(wstring filename);
+	DirectX::DDS_LOADER_FLAGS GetDDSFlags();
 	void LoadFromFile(ID3D11Device *mOrigDevice);
 	void LoadBufferFromFile(ID3D11Device *mOrigDevice);
 	void SubstantiateBuffer(ID3D11Device *mOrigDevice, void **buf, DWORD size);

@@ -6587,14 +6587,30 @@ bool CustomResource::HasPNGsRGBChunk(wstring filename)
 DirectX::WIC_LOADER_FLAGS CustomResource::GetWICFlags(wstring filename)
 {
 	switch (override_color_space) {
-		case CustomColorSpace::LINEAR:
 		case CustomColorSpace::SRGB:
-			return (DirectX::WIC_LOADER_FLAGS) override_color_space;
+			return DirectX::WIC_LOADER_FLAGS::WIC_LOADER_FORCE_SRGB;
+		case CustomColorSpace::LINEAR:
+			return DirectX::WIC_LOADER_FLAGS::WIC_LOADER_IGNORE_SRGB;
 		default:
+			// Nothing said, so a PNG that declares sRGB is taken at its word:
 			if (G->gForceDetectColorSpace && HasPNGsRGBChunk(filename))
 				return DirectX::WIC_LOADER_FLAGS::WIC_LOADER_FORCE_SRGB;
 	}
 	return DirectX::WIC_LOADER_FLAGS::WIC_LOADER_DEFAULT;
+}
+
+// color_space on a DDS file. There is no equivalent of the PNG sRGB chunk to
+// fall back on: a DDS either carries an _SRGB format or it does not, and saying
+// so in the ini is the only way to override what it carries.
+DirectX::DDS_LOADER_FLAGS CustomResource::GetDDSFlags()
+{
+	switch (override_color_space) {
+		case CustomColorSpace::SRGB:
+			return DirectX::DDS_LOADER_FLAGS::DDS_LOADER_FORCE_SRGB;
+		case CustomColorSpace::LINEAR:
+			return DirectX::DDS_LOADER_FLAGS::DDS_LOADER_IGNORE_SRGB;
+	}
+	return DirectX::DDS_LOADER_FLAGS::DDS_LOADER_DEFAULT;
 }
 
 void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
@@ -6641,10 +6657,7 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 		hr = DirectX::CreateDDSTextureFromFileEx(mOrigDevice1,
 				filename.c_str(), 0,
 				D3D11_USAGE_DEFAULT, bind_flags, 0, misc_flags,
-				override_color_space == CustomColorSpace::SRGB
-					? DirectX::DDS_LOADER_FLAGS::DDS_LOADER_FORCE_SRGB
-					: DirectX::DDS_LOADER_FLAGS::DDS_LOADER_DEFAULT,
-				&resource, NULL, NULL);
+				GetDDSFlags(), &resource, NULL, NULL);
 	} else {
 		LogInfoW(L"Loading custom resource %s as WIC, bind_flags=0x%03x\n", filename.c_str(), bind_flags);
 		hr = DirectX::CreateWICTextureFromFileEx(mOrigDevice1,
