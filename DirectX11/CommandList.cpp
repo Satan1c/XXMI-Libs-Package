@@ -7384,6 +7384,14 @@ bool CustomResourcePool::PropagateFlags(D3D11_BIND_FLAG bind_flags, D3D11_RESOUR
 	return ret;
 }
 
+size_t CustomResourcePool::RingIndex(float id) const
+{
+	// Signed arithmetic: an unsigned pool_size makes a negative id huge.
+	int size = (int)pool_size;
+
+	return (size_t)(((int)id % size + size) % size);
+}
+
 size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool is_assignment)
 {
 	ExpireElements();
@@ -7401,7 +7409,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 		// For pool [ResourceA, ResourceB, ResourceC]
 		//   ResourcePoolFoo[-1] returns ResourceC pool_index (2)
 		//   ResourcePoolFoo[3] returns ResourceA pool_index (0)
-		pool_index = ((int)id % pool_size + pool_size) % pool_size;
+		pool_index = RingIndex(id);
 
 		if (expiration_timeout_frames != UINT32_MAX)
 			PostponeExpiration(index_table[pool_index], is_assignment);
@@ -9202,6 +9210,10 @@ static CommandListCommand* parse_slot_range_operation(
 	const wchar_t* section, ResourceCopyTarget& dst, ResourceCopyTarget& src, ResourceCopyOptions options, CommandList* command_list, const wstring* ini_namespace
 );
 
+static CommandListCommand* parse_pool_range_operation(
+	const wchar_t* section, ResourceCopyTarget& dst, ResourceCopyTarget& src, ResourceCopyOptions options, CommandList* command_list, const wstring* ini_namespace
+);
+
 bool ParseCommandListResourceCopyTargetDirective(
 	const wchar_t *section, const wchar_t *key, wstring *val, CommandList *command_list, const wstring *ini_namespace
 )
@@ -9256,6 +9268,14 @@ bool ParseCommandListResourceCopyTargetDirective(
 		{
 			// ps-t[$a:$b] = ref PoolFoo[$c:$d]  /  PoolFoo[$c:$d] = ref ps-t[$a:$b]
 			operation = parse_slot_range_operation(section, dst, src, options, command_list, ini_namespace);
+			break;
+		}
+
+		if (dst.evaluation_mode == ResourceCopyTargetEvaluationMode::POOL_RANGE
+			|| src.evaluation_mode == ResourceCopyTargetEvaluationMode::POOL_RANGE)
+		{
+			// PoolFoo[$a:$b] = ref PoolBar[$c:$d]
+			operation = parse_pool_range_operation(section, dst, src, options, command_list, ini_namespace);
 			break;
 		}
 
@@ -10133,17 +10153,11 @@ static void set_stream_output_slot(ID3D11DeviceContext1 *context, unsigned slot,
 	// so a draw call can re-skin one object out of a shared mesh:
 	//   so0 = ref ResourceFoo->Region($start * $stride, $count * $stride)
 	//
-	// The slots this is not binding keep the offset 0,
-	// which is what they were given when offsets were NULL:
-	// SOGetTargets() does not report the offsets they were bound at,
-	// so there is nothing to put back.
-	//
-	// XXX: (UINT)-1 for those slots may well be better.
-	// It means "append": the stage carries on writing,
+	// SOGetTargets() does not report where the other slots were bound,
+	// so they are rebound at (UINT)-1, which D3D11 reads as "append":
+	// the stage carries on after whatever it last wrote,
 	// instead of starting over and overwriting what is there.
-	// That is closer to leaving an unmentioned slot alone,
-	// but it changes their behaviour,
-	// so it wants testing in a game that binds several targets.
+	std::fill_n(so_offsets, D3D11_SO_STREAM_COUNT, UINT(-1));
 	so_offsets[slot] = offset;
 	context->SOSetTargets(D3D11_SO_STREAM_COUNT, so_bufs, so_offsets);
 	release_slots(so_bufs, D3D11_SO_STREAM_COUNT, slot);
@@ -11046,7 +11060,11 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 {
 	D3D11_BUFFER_DESC new_desc;
 	ID3D11Buffer *buffer = NULL;
-	UINT dst_size;
+
+	// Preserve an explicitly requested copy size.
+	// The compatibility logic below adjusts the destination size.
+	// Zero means use the default size.
+	UINT dst_size = *buf_dst_size;
 
 	src_resource->GetDesc(&new_desc);
 	new_desc.BindFlags = bind_flags;
@@ -11067,72 +11085,87 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		new_desc.CPUAccessFlags = 0;
 	}
 
-	if (bind_flags & D3D11_BIND_CONSTANT_BUFFER || (src && src->type == ResourceCopyTargetType::CONSTANT_BUFFER)) {
-		// Constant buffers created via SetConstantBuffer1 may have region size specified (derived from NumConstants).
-		// So we'll use source CB size whenever it's available, since other data is irrelevant for current shader call.
-		if (src && src->type == ResourceCopyTargetType::CONSTANT_BUFFER) {
-			if (*buf_src_size) {
-				*buf_dst_size = *buf_src_size;      // Set DST CB size to "visible region" size
-				*buf_src_size = new_desc.ByteWidth; // Set SRC CB size to its actual size
-				new_desc.ByteWidth = *buf_dst_size; // Set DST DESC size to "visible region" size
-			}
-		}
+	bool src_is_cb = src && src->type == ResourceCopyTargetType::CONSTANT_BUFFER;
 
-		if (bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
-			// Constant buffers have additional limitations. The size must
-			// be a multiple of 16, so round up if necessary, and it cannot
-			// be larger than 4096 x 4 component x 4 byte constants.
-			dst_size = (new_desc.ByteWidth + 15) & ~0xf;
-			dst_size = min(dst_size, D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
+	// SetConstantBuffers1 can expose a subrange of a larger backing buffer.
+	// Use the visible range as the default destination size,
+	// but retain the backing buffer's full size in buf_src_size,
+	// for source-bound calculations.
+	// An explicit copy size is preserved separately in dst_size.
+	if (src_is_cb && *buf_src_size) {
+		*buf_dst_size = *buf_src_size;
+		*buf_src_size = new_desc.ByteWidth;
+		new_desc.ByteWidth = *buf_dst_size;
+	}
 
-			// Constant buffers cannot be structured, so clear that flag
-			// and the stride that came with it. D3D11 ignores a stride
-			// without the flag, but GetResourceStride() (`->stride`) and
-			// FillInMissingInfo() both read it back out of the buffer
-			// description, and would report the source's element size for
-			// a buffer that is no longer made of elements:
-			new_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-			new_desc.StructureByteStride = 0;
+	// Constant-buffer handling above may reduce the destination width.
+	// It becomes the currently bound range,
+	// while buf_src_size retains the backing-buffer size.
+	UINT max_dst_size = new_desc.ByteWidth;
+	if (src_is_cb && *buf_src_size)
+		max_dst_size = max(max_dst_size, *buf_src_size);
 
-			// If the size of the new resource doesn't match the old or
-			// there is an offset we will have to perform a region copy
-			// instead of a regular copy:
-			if (offset || dst_size != new_desc.ByteWidth) {
-				// It might be temping to take the offset into account
-				// here and make the buffer only as large as it need to
-				// be, but it's possible that the source offset might
-				// change much more often than the source buffer (just
-				// a guess), which could potentially lead us to
-				// constantly recreating the destination buffer.
+	if (dst_size > 0) {
+		// Preserve the requested copy length up to the available buffer extent.
+		// Do not truncate it to the visible constant-buffer range.
+		dst_size = min(dst_size, max_dst_size);
+	} else {
+		dst_size = new_desc.ByteWidth;
+	}
 
-				// Note down the size of the source and destination:
-				*buf_dst_size = dst_size;
-				new_desc.ByteWidth = dst_size;
-			}
-		}
-	} else if (IsConversionToStructuredBufferRequired(src_view, stride, offset, format, bind_flags)) {
+	if (bind_flags & D3D11_BIND_CONSTANT_BUFFER)
+	{
+		// Constant buffers have additional limitations:
+		// the size must be a multiple of 16, so round up if necessary,
+		// and it cannot be larger than 4096 x 4 component x 4 byte constants.
+		dst_size = (dst_size + 15) & ~0xf;
+		dst_size = min(dst_size, D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
+
+		// Constant buffers cannot be structured,
+		// so clear that flag and the stride that came with it.
+		// D3D11 ignores a stride without the flag.
+		// GetResourceStride() (`->stride`) and FillInMissingInfo()
+		// both read it back out of the buffer description, though.
+		// They would report the source's element size.
+		// That is wrong for a buffer that is no longer made of elements:
+		new_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		new_desc.StructureByteStride = 0;
+	}
+	else if (src_is_cb)
+	{
+		// Optimize away the checks below.
+	}
+	else if (IsConversionToStructuredBufferRequired(src_view, stride, offset, format, bind_flags))
+	{
 		new_desc.MiscFlags |= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		new_desc.StructureByteStride = stride;
 
 		// A structured buffer needs to be a multiple of it's stride,
 		// which may not be the case if we're converting a buffer to
 		// one. Round it down:
-		dst_size = new_desc.ByteWidth / stride * stride;
-		// For now always using the region copy if there's an offset.
-		// We might not need to do that if the offset is aligned to the
-		// stride (although we would need to recreate the view every
-		// time it changed), but for now it seems safest to use the
-		// region copy method whenever there is an offset:
-		if (offset || dst_size != new_desc.ByteWidth) {
-			*buf_dst_size = dst_size;
-			new_desc.ByteWidth = dst_size;
-		}
-	} else if (!src_view && offset) {
+		dst_size = dst_size / stride * stride;
+	}
+	else if (offset)
+	{
 		// No source view but we do have an offset - use the region
 		// copy to knock out the offset. We can probably assume the
 		// original resource met all the size and alignment
 		// constraints, so we shouldn't need to resize it.
-		*buf_dst_size = new_desc.ByteWidth;
+		if (src_view)
+			offset = 0;
+	}
+
+	// If the size of the new resource doesn't match the old,
+	// or there is an offset,
+	// we will have to perform a region copy instead of a regular copy:
+	if (offset || dst_size != new_desc.ByteWidth)
+	{
+		// It might be tempting to take the offset into account here.
+		// The buffer would then be only as large as it needs to be.
+		// The source offset might change much more often than the source buffer (just a guess).
+		// That could potentially lead us to constantly recreating the destination buffer.
+		*buf_dst_size = dst_size;
+		new_desc.ByteWidth = dst_size;
 	}
 
 	if (dst && dst->type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
@@ -12065,20 +12098,25 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 		CommandListState *state, UINT src_stride, UINT *src_offset,
 		UINT buf_src_size, UINT buf_dst_size)
 {
-	// We are copying a buffer for use in a constant buffer and the size of
-	// the original buffer did not meet the constraints of a constant
-	// buffer.
+	// Copy a byte range from the source buffer into the destination,
+	// starting at destination offset 0.
+	// This also handles buffer conversions that require a region copy,
+	// including constant-buffer size and alignment constraints.
 	D3D11_BOX src_box;
 
-	// We want to copy from the offset to the end of the source buffer, but
-	// cap it to the destination size to avoid "undefined behaviour". Keep
-	// in mind that this is "right", not "size":
+	// D3D11_BOX::right is an exclusive end offset,
+	// whereas buf_dst_size is a byte count.
+	// Calculate the requested end and clamp it to the source buffer's total size,
+	// so the copy does not extend beyond the source.
+	UINT available_size = buf_src_size - *src_offset;
+	UINT copy_size = min(buf_dst_size, available_size);
 	src_box.left = *src_offset;
-	src_box.right = min(buf_src_size, *src_offset + buf_dst_size);
+	src_box.right = *src_offset + copy_size;
 
 	if (src_stride) {
-		// If we are copying to a structured resource, the source box
-		// must be a multiple of the stride, so round it down:
+		// When copying into a structured buffer,
+		// the copied byte range must contain whole elements.
+		// Round the end down to the nearest stride boundary.
 		src_box.right = (src_box.right - src_box.left) / src_stride * src_stride + src_box.left;
 	}
 
@@ -12434,6 +12472,14 @@ void ResourceCopyOperation::CopyResourceToTarget(CommandListState* state, Resour
 	ResourceCopyInfo dst_info;
 	bool have_destination = true;
 
+	// Region(offset, size) is a byte offset and a byte count.
+	// The size is the requested destination copy size,
+	// and the copy helper works out the exclusive source end from both:
+	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION) {
+		src_info.offset = (UINT)src.member_args[0].GetValue(state);
+		dst_info.size = (UINT)src.member_args[1].GetValue(state);
+	}
+
 	if (options & ResourceCopyOptions::COPY_MASK)
 		have_destination = CopyToCachedResource(state, dst_target, &src_info, cache, &dst_info);
 	else
@@ -12579,8 +12625,8 @@ bool ResourceCopyOperation::CopyToCachedResource(CommandListState* state, Resour
 				state, src_info->stride, &src_info->offset,
 				src_info->size, dst_info->size);
 	} else {
-		COMMAND_LIST_LOG(state, "  performing full copy (src_stride=%d src_offset=%d src_size=%d dst_size=%d)\n",
-			src_info->stride, src_info->offset, src_info->size, dst_info->size);
+		COMMAND_LIST_LOG(state, "  performing full copy (src_stride=%d src_offset=%d src_size=%d)\n",
+			src_info->stride, src_info->offset, src_info->size);
 		Profiling::resource_full_copies++;
 		if (G->cache_resource_data != DataCacheBindFlags::INVALID && cache.custom_resource)
 			cache.custom_resource->SetHandleInfo(src_info->resource, 0, dst_info->size);
@@ -12596,21 +12642,12 @@ bool ResourceCopyOperation::CopyToCachedResource(CommandListState* state, Resour
 // which BindCopyResult() creates when the source has none to reuse.
 void ResourceCopyOperation::ReferenceSource(CommandListState* state, ResourceCopyTarget& dst_target, ResourceCopyInfo* src_info, const ResourceCopyCache& cache, ResourceCopyInfo* dst_info)
 {
-	COMMAND_LIST_LOG(state, "  copying by reference\n");
+	COMMAND_LIST_LOG(state, "  copying by reference (src_stride=%d src_offset=%d src_size=%d dst_size=%d)\n",
+		src_info->stride, src_info->offset, src_info->size, dst_info->size);
 	Profiling::resource_reference_copies++;
 
-	// A ->Region($offset, $size) source names the part of the resource to bind,
-	// and the destination's size is that region's.
-	// run() has already applied the offset to src_info,
-	// but a batch calls in without going through it:
-	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION)
-	{
-		src_info->offset = (UINT)src.member_args[0].GetValue(state);
-		dst_info->size = (UINT)src.member_args[1].GetValue(state);
-	}
-
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID && cache.custom_resource)
-		cache.custom_resource->SetHandleInfo(src_info->resource, src_info->offset, src_info->size);
+		cache.custom_resource->SetHandleInfo(src_info->resource, src_info->offset, dst_info->size ? dst_info->size : src_info->size);
 
 	dst_info->resource = src_info->resource;
 	dst_info->view = UsableRefView(&dst_target, state, src_info->view, dst_info->resource);
@@ -12724,13 +12761,12 @@ void ResourceCopyOperation::run(CommandListState *state)
 	ResourceCopyInfo src_info;
 
 	src_info.resource = src.GetResource(state, &src_info, (options & ResourceCopyOptions::REFERENCE) ? &dst : NULL);
-	
-	if (src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_REGION)
-	{
-		src_info.offset = (UINT)src.member_args[0].GetValue(state);
-		src_info.size = (UINT)src.member_args[1].GetValue(state);
-	}
 
+	CopyResolvedSource(state, src_info);
+}
+
+void ResourceCopyOperation::CopyResolvedSource(CommandListState *state, ResourceCopyInfo &src_info)
+{
 	switch (dst.type)
 	{
 	case ResourceCopyTargetType::POOL:
@@ -13760,4 +13796,154 @@ void SlotRangeCopyOperation::run(CommandListState *state)
 }
 
 #pragma endregion SlotRangeCopyOperation
+
+#pragma region PoolRangeCopyOperation
+
+static CommandListCommand* parse_pool_range_operation(
+	const wchar_t* section, ResourceCopyTarget& dst, ResourceCopyTarget& src, ResourceCopyOptions options, CommandList* command_list, const wstring* ini_namespace
+)
+{
+	// A range on one side only would be dropped silently, by whichever generic copy the line falls through to:
+	if (dst.evaluation_mode != ResourceCopyTargetEvaluationMode::POOL_RANGE
+		|| src.evaluation_mode != ResourceCopyTargetEvaluationMode::POOL_RANGE)
+	{
+		LogOverlayW(LOG_WARNING, L"A pool range pairs only with a slot range or another pool range\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
+		return nullptr;
+	}
+
+	// The default of a single `PoolFoo[0] = PoolBar[0]` line,
+	// whose destination is a custom resource:
+	if (!(options & ResourceCopyOptions::COPY_TYPE_MASK))
+		options |= ResourceCopyOptions::COPY;
+
+	if (options & ResourceCopyOptions::REFERENCE) {
+		CustomResource* src_template = src.custom_resource_pool->resource_template;
+		CustomResource* dst_template = dst.custom_resource_pool->resource_template;
+
+		if (!src.custom_resource_pool->PropagateFlags(dst_template->bind_flags, dst_template->misc_flags)) {
+			LogOverlayW(LOG_WARNING, L"Pool range source has incompatible bind flags\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
+			return nullptr;
+		}
+		DeferBindFlagsPropagation(src_template, dst_template);
+	}
+
+	PoolRangeCopyOperation* operation = new PoolRangeCopyOperation();
+	operation->src = std::move(src);
+	operation->dst = std::move(dst);
+	operation->options = options;
+	return operation;
+}
+
+bool PoolRangeCopyOperation::optimise(HackerDevice *device)
+{
+	bool ret = false;
+	for (ResourceCopyTarget *target : { &src, &dst }) {
+		if (target->range_start)
+			ret = target->range_start->optimise(device) || ret;
+		if (target->range_end)
+			ret = target->range_end->optimise(device) || ret;
+	}
+	return ret;
+}
+
+// "PoolFoo[3]" for the frame analysis log:
+static std::wstring pool_element_log_name(const ResourceCopyTarget &target, int pool_first, unsigned index)
+{
+	return target.custom_resource_pool->name + L"[" + std::to_wstring(pool_first + (int)index) + L"]";
+}
+
+void PoolRangeCopyOperation::CopyElement(CommandListState *state, ResourceCopyOperation &element_op, int src_first, int dst_first, unsigned index)
+{
+	ResourceCopyInfo src_info;
+	std::wstring dst_name, src_name;
+
+	if (G->analyse_frame) {
+		dst_name = pool_element_log_name(dst, dst_first, index);
+		src_name = pool_element_log_name(src, src_first, index);
+	}
+
+	element_op.src.SetCustomResource(pool_element(src.custom_resource_pool, src_first, index, false));
+	// Only read for its bind flags, which come from the pool's template:
+	// the real destination waits until the source is known to be copied.
+	element_op.dst.SetCustomResource(dst.custom_resource_pool->ResolvePool()->resource_template);
+	src_info.resource = element_op.src.GetResource(state, &src_info, (options & ResourceCopyOptions::REFERENCE) ? &element_op.dst : NULL);
+
+	// unless_null must leave the element exactly as it was,
+	// so bail before resolving it as an assignment, which postpones its expiration:
+	if (!src_info.resource && (options & ResourceCopyOptions::UNLESS_NULL)) {
+		SLOT_RANGE_LOG(state, "  %S = %s %S: source is NULL, keeping current resource\n",
+			dst_name.c_str(), copy_type_name(options), src_name.c_str());
+		return;
+	}
+
+	SLOT_RANGE_LOG(state, "  %S = %s %S\n", dst_name.c_str(), copy_type_name(options), src_name.c_str());
+
+	element_op.dst.SetCustomResource(pool_element(dst.custom_resource_pool, dst_first, index, true));
+	state->extra_indent += 2;
+	element_op.CopyResolvedSource(state, src_info);
+	state->extra_indent -= 2;
+}
+
+// Within one pool a later element may be the source of an earlier write, or the reverse,
+// and indices wrap around the ring, so the distance is taken modulo the pool size.
+PoolRangeCopyOperation::Order PoolRangeCopyOperation::CopyOrder(int src_first, int dst_first, unsigned count)
+{
+	CustomResourcePool *pool = dst.custom_resource_pool->ResolvePool();
+	if (pool != src.custom_resource_pool->ResolvePool())
+		return Order::FORWARD;
+
+	long long size = (long long)pool->GetPoolSize();
+	if (size <= 0)
+		return Order::FORWARD;
+
+	long long src_index = (long long)pool->RingIndex((float)src_first);
+	long long dst_index = (long long)pool->RingIndex((float)dst_first);
+
+	long long distance = (dst_index - src_index + size) % size;
+	if (distance == 0)
+		return Order::SKIP;
+	if (distance >= count)
+		return Order::FORWARD;
+
+	// The destination also overlaps the source from the other side of the ring:
+	if (size - distance < count) {
+		LogOverlayW(LOG_WARNING, L"Pool range wraps onto itself, skipping the copy\n - [%ls]\n", ini_line.c_str());
+		return Order::SKIP;
+	}
+
+	return Order::BACKWARD;
+}
+
+void PoolRangeCopyOperation::run(CommandListState *state)
+{
+	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+
+	int src_first = 0, dst_first = 0;
+	unsigned src_count = 0, dst_count = 0;
+
+	if (!src.ResolveRange(state, &src_first, &src_count) || !dst.ResolveRange(state, &dst_first, &dst_count))
+		return;
+
+	if (src_count != dst_count) {
+		LogOverlayW(LOG_WARNING, L"Pool range sizes differ (%u vs %u)\n - [%ls]\n", dst_count, src_count, ini_line.c_str());
+		return;
+	}
+
+	// Walk away from the overlap so that no element is read after it was overwritten:
+	Order order = CopyOrder(src_first, dst_first, src_count);
+	if (order == Order::SKIP)
+		return;
+
+	// A local operation, as the command itself is shared by every context running it:
+	ResourceCopyOperation element_op;
+	element_op.options = options;
+	element_op.ini_line = ini_line;
+	element_op.src.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
+	element_op.dst.type = ResourceCopyTargetType::CUSTOM_RESOURCE;
+
+	for (unsigned n = 0; n < src_count; n++)
+		CopyElement(state, element_op, src_first, dst_first, order == Order::BACKWARD ? src_count - 1 - n : n);
+}
+
+#pragma endregion PoolRangeCopyOperation
 

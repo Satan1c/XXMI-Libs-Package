@@ -34,6 +34,6 @@ Only the offset applies, as D3D11 takes no size for a stream output target. See 
 
 ## Limitations
 
-* **Offsets cannot be read back.** D3D11 has no call that reports the offset a stream output target was bound at. So `so0->Offset` reports unknown, `->Region` on an `so` *source* measures from the start of the buffer rather than from wherever the game bound it, and binding one slot leaves the other three at offset 0.
+* **Offsets cannot be read back.** D3D11 has no call that reports the offset a stream output target was bound at. So `so0->Offset` reports unknown, `->Region` on an `so` *source* measures from the start of the buffer rather than from wherever the game bound it, and the slots a line does not name are rebound to append, so they carry on after whatever was last written to them.
 * **Ranges are not accepted.** `so[$i]` works, as it does for any pipeline slot (see [Slot Indexing](slot-indexing.md)), but there is no `so[$a:$b]` form.
 * **The shader doing the writing cannot be overridden.** A geometry shader created together with its stream output declaration is not registered, so it has no hash: hunting does not list it, and `[ShaderOverride]` and shader replacement do not apply to it. The buffers reached through `so0` to `so3` are the only handle a fix has on a stream output pass.

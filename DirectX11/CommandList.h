@@ -716,6 +716,7 @@ public:
 	void Initialize(size_t pool_size);
 	bool PropagateFlags(D3D11_BIND_FLAG bind_flags, D3D11_RESOURCE_MISC_FLAG misc_flags);
 
+	size_t RingIndex(float id) const;
 	size_t GetElementIndex(float id, bool use_ring_index, bool is_assignment);
 	CustomResource* GetResource(float id, bool template_lookup, bool use_ring_index, bool is_assignment);
 	CommandListVariable* GetVariable(float id, bool template_lookup, bool use_ring_index, bool is_assignment);
@@ -1327,6 +1328,9 @@ public:
 
 	void CopyResourceToResource(CommandListState* state, const ResourceCopyInfo& src_info);
 	void CopyResourceToPool(CommandListState* state, const ResourceCopyInfo& src_info);
+	// Copies a resolved source to the destination,
+	// then releases what the caller got from GetResource():
+	void CopyResolvedSource(CommandListState* state, ResourceCopyInfo& src_info);
 
 	void run(CommandListState*) override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
@@ -1454,6 +1458,24 @@ private:
 	void FetchSlotOp(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
 	void FetchSlotRef(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
 	ID3D11View* ViewForSlot(CommandListState *state, unsigned index, ID3D11Resource *resource, ID3D11View *src_view);
+};
+
+// "PoolFoo[$a:$b] = ref PoolBar[$c:$d]":
+// the equivalent single element line for each element, with unless_null judged per element.
+class PoolRangeCopyOperation : public CommandListCommand {
+public:
+	ResourceCopyTarget src;
+	ResourceCopyTarget dst;
+	ResourceCopyOptions options = ResourceCopyOptions::INVALID;
+
+	bool optimise(HackerDevice *device) override;
+	void run(CommandListState*) override;
+
+private:
+	enum class Order { FORWARD, BACKWARD, SKIP };
+
+	Order CopyOrder(int src_first, int dst_first, unsigned count);
+	void CopyElement(CommandListState *state, ResourceCopyOperation &element_op, int src_first, int dst_first, unsigned index);
 };
 
 class PoolCopyOperation : public CommandListCommand {
