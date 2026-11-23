@@ -1775,6 +1775,8 @@ void StoreCommand::run(CommandListState* state)
 
 	ResourceCopyInfo src_info;
 	ID3D11Resource* src_resource = src.GetResource(state, &src_info);
+	if (src_info.view)
+		src_info.view->Release();
 
 	if (!src_resource)
 	{
