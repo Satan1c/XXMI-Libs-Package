@@ -617,7 +617,7 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 		LogInfo("    assembling replacement ASM code with shader model %s\n", shaderModel);
 
 		// We need original byte code unchanged, so make a copy.
-		vector<byte> byteCode(origByteCode->GetBufferSize());
+		vector<byte_t> byteCode(origByteCode->GetBufferSize());
 		memcpy(byteCode.data(), origByteCode->GetBufferPointer(), origByteCode->GetBufferSize());
 
 		try
@@ -2089,6 +2089,8 @@ void ParseHuntingSection()
 	}
 
 	G->verbose_overlay = GetIniBool(L"Hunting", L"verbose_overlay", false, NULL);
+
+	G->dump_mips = GetIniBool(L"Hunting", L"dump_mips", true, NULL);
 }
 
 void RegisterVisitedIndexBufferNoLock(uint32_t hash)
