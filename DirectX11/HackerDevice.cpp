@@ -769,7 +769,7 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// Compile replacement.
 			LogInfo("    compiling replacement HLSL code with shader model %s\n", tmpShaderModel);
 
-			ID3DBlob *errorMsgs; // FIXME: This can leak
+			ID3DBlob *errorMsgs = nullptr;
 			ID3DBlob *compiledOutput = 0;
 			// Pass the real filename and use the standard include handler so that
 			// #include will work with a relative path from the shader itself.
@@ -799,8 +799,9 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 				LogInfo("--------------------------------------------- BEGIN ---------------------------------------------\n");
 				fwrite(errMsg, 1, errSize - 1, LogFile);
 				LogInfo("---------------------------------------------- END ----------------------------------------------\n");
-				errorMsgs->Release();
 			}
+			if (errorMsgs)
+				errorMsgs->Release();
 
 			// Cache binary replacement.
 			if (G->CACHE_SHADERS && pCode)
@@ -883,7 +884,7 @@ static bool ReplaceASMShader(__in UINT64 hash, const wchar_t *pShaderType, const
 			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
 			pHeaderLine = utf8_to_utf16.from_bytes(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
 
-			vector<byte> byteCode(pBytecodeLength);
+			vector<byte_t> byteCode(pBytecodeLength);
 			memcpy(byteCode.data(), pShaderBytecode, pBytecodeLength);
 
 			// Re-assemble the ASM text back to binary
@@ -1046,7 +1047,7 @@ static bool DecompileAndPossiblyPatchShader(__in UINT64 hash,
 
 	LogInfo("    compiling fixed HLSL code with shader model %s, size = %Iu\n", tmpShaderModel, decompiledCode.size());
 
-	ID3DBlob *pErrorMsgs;
+	ID3DBlob *pErrorMsgs = nullptr;
 	ID3DBlob *pCompiledOutput = NULL;
 	// Probably unecessary here since this shader is one we freshly decompiled,
 	// but for consistency pass the path here as well so that the standard
@@ -2340,6 +2341,9 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	// Register texture. Every one seen.
 	if (hr == S_OK && ppTexture2D)
 	{
+		D3D11_TEXTURE2D_DESC actualDesc = {};
+		(*ppTexture2D)->GetDesc(&actualDesc);
+
 		EnterCriticalSectionPretty(&G->mResourcesLock);
 			ResourceHandleInfo *handle_info = &G->mResources[*ppTexture2D];
 			new ResourceReleaseTracker(*ppTexture2D);
@@ -2347,9 +2351,11 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->InitializeSubresourceTracking(actualDesc.MipLevels, actualDesc.ArraySize, pInitialData != nullptr);
 			if (pDesc)
 				memcpy(&handle_info->desc2D, pDesc, sizeof(D3D11_TEXTURE2D_DESC));
 		LeaveCriticalSection(&G->mResourcesLock);
+
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 			if (G->hunting && pDesc) {
 				G->mResourceInfo[hash] = *pDesc;
@@ -2714,6 +2720,13 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 
 	// TODO: This is another call that can create geometry and/or vertex
 	// shaders - hook them up and allow them to be overridden as well.
+	//
+	// Until then, a shader created here never passes through CreateShader(),
+	// so it gets no hash in G->mShaders and no cached bindings.
+	// Everything keyed off that lookup passes it by: hunting never sees it,
+	// and neither [ShaderOverride] nor ShaderFixes applies to it.
+	// The buffers it writes are reachable from the command list as so0..3,
+	// the only handle a fix has on a stream output pass.
 
 	HRESULT hr = mOrigDevice1->CreateGeometryShaderWithStreamOutput(pShaderBytecode, BytecodeLength, pSODeclaration,
 		NumEntries, pBufferStrides, NumStrides, RasterizedStream, pClassLinkage, ppGeometryShader);

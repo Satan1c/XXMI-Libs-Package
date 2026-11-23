@@ -9,6 +9,7 @@
 #include <DirectXMath.h>
 #include <util.h>
 #include <WICTextureLoader.h>
+#include <DDSTextureLoader.h>
 
 #include "DrawCallInfo.h"
 #include "ResourceHash.h"
@@ -27,6 +28,7 @@ class HackerDevice;
 class HackerContext;
 enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
+class ResourceFilterTarget;
 
 struct InputLayoutElementOverride {
 	struct Match {
@@ -209,6 +211,35 @@ extern std::vector<CommandList*> registered_command_lists;
 extern std::unordered_set<CommandList*> command_lists_profiling;
 extern std::unordered_set<CommandListCommand*> command_lists_cmd_profiling;
 void clear_command_list_profiling();
+
+struct InitialTexturesSnapshot
+{
+	static constexpr UINT SLOT_COUNT = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+
+	// Initial SRVs captured at the beginning of the draw.
+	// Non-null means that the slot is eligible for matching.
+	std::array<ID3D11ShaderResourceView*, SLOT_COUNT> initial_textures{};
+
+	// Hamming distance accepted for each slot during this draw.
+	std::array<uint8_t, SLOT_COUNT> hamming_distance{};
+
+	bool active = false;
+	unsigned call_number = 0;
+
+	UINT first_srv_slot = 0;
+	UINT last_srv_slot = 0;
+
+	InitialTexturesSnapshot()
+	{
+		hamming_distance.fill(65);
+	}
+
+	~InitialTexturesSnapshot();
+	void Clear();
+	void ResetMatches();
+
+	void SnapshotInitialTextures(CommandListState* state);
+};
 
 // Forward declaration to avoid circular reference since Override.h includes
 // HackerDevice.h includes HackerContext.h includes CommandList.h
@@ -476,16 +507,16 @@ static EnumName_t<const wchar_t *, CustomColorSpace> CustomColorSpaceNames[] = {
 // D3D11_BIND_FLAG, but this allows us to use parse_enum_option_string.
 enum class CustomResourceBindFlags {
 	INVALID         = 0x00000000,
-	VERTEX_BUFFER   = 0x00000001,
-	INDEX_BUFFER    = 0x00000002,
-	CONSTANT_BUFFER = 0x00000004,
-	SHADER_RESOURCE = 0x00000008,
-	STREAM_OUTPUT   = 0x00000010,
-	RENDER_TARGET   = 0x00000020,
-	DEPTH_STENCIL   = 0x00000040,
-	UNORDERED_ACCESS= 0x00000080,
-	DECODER         = 0x00000200,
-	VIDEO_ENCODER   = 0x00000400,
+	VERTEX_BUFFER   = D3D11_BIND_VERTEX_BUFFER,
+	INDEX_BUFFER    = D3D11_BIND_INDEX_BUFFER,
+	CONSTANT_BUFFER = D3D11_BIND_CONSTANT_BUFFER,
+	SHADER_RESOURCE = D3D11_BIND_SHADER_RESOURCE,
+	STREAM_OUTPUT   = D3D11_BIND_STREAM_OUTPUT,
+	RENDER_TARGET   = D3D11_BIND_RENDER_TARGET,
+	DEPTH_STENCIL   = D3D11_BIND_DEPTH_STENCIL,
+	UNORDERED_ACCESS= D3D11_BIND_UNORDERED_ACCESS,
+	DECODER         = D3D11_BIND_DECODER,
+	VIDEO_ENCODER   = D3D11_BIND_VIDEO_ENCODER,
 };
 SENSIBLE_ENUM(CustomResourceBindFlags);
 static EnumName_t<const wchar_t *, CustomResourceBindFlags> CustomResourceBindFlagNames[] = {
@@ -501,6 +532,44 @@ static EnumName_t<const wchar_t *, CustomResourceBindFlags> CustomResourceBindFl
 	{L"video_encoder", CustomResourceBindFlags::VIDEO_ENCODER},
 	{NULL, CustomResourceBindFlags::INVALID} // End of list marker
 };
+
+enum class DataCacheBindFlags {
+	INVALID = 0x00000000,
+	VERTEX_BUFFER = D3D11_BIND_VERTEX_BUFFER,
+	INDEX_BUFFER = D3D11_BIND_INDEX_BUFFER,
+	CONSTANT_BUFFER = D3D11_BIND_CONSTANT_BUFFER,
+
+	ALL_MASK = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER | D3D11_BIND_CONSTANT_BUFFER,
+};
+SENSIBLE_ENUM(DataCacheBindFlags);
+static EnumName_t<const wchar_t*, DataCacheBindFlags> DataCacheBindFlagNames[] = {
+	{L"vertex_buffer", DataCacheBindFlags::VERTEX_BUFFER},
+	{L"index_buffer", DataCacheBindFlags::INDEX_BUFFER},
+	{L"constant_buffer", DataCacheBindFlags::CONSTANT_BUFFER},
+	{L"all", DataCacheBindFlags::ALL_MASK},
+	{NULL, DataCacheBindFlags::INVALID} // End of list marker
+};
+
+class ResourceFilter
+{
+public:
+	wstring name;
+	bool is_empty = true;
+
+	uint64_t match_dhash = 0;
+	DXGI_FORMAT match_format = DXGI_FORMAT_UNKNOWN;
+	float match_confidence = 0.75f;
+
+	ResourceFilter* ResolveFilter();
+	bool SetSource(ResourceFilter* source);
+	void CopyMetadataFrom(const ResourceFilter& src);
+
+private:
+	ResourceFilter* source_filter = nullptr;
+};
+
+typedef std::unordered_map<std::wstring, class ResourceFilter> ResourceFilters;
+extern ResourceFilters resourceFilters;
 
 // The ResourcePool holds a pool of cached resources for when a single copy
 // operation or a custom resource may be copied to from multiple distinct
@@ -603,6 +672,7 @@ public:
 private:
 	bool HasPNGsRGBChunk(wstring filename);
 	DirectX::WIC_LOADER_FLAGS GetWICFlags(wstring filename);
+	DirectX::DDS_LOADER_FLAGS GetDDSFlags();
 	void LoadFromFile(ID3D11Device *mOrigDevice);
 	void LoadBufferFromFile(ID3D11Device *mOrigDevice);
 	void SubstantiateBuffer(ID3D11Device *mOrigDevice, void **buf, DWORD size);
@@ -801,42 +871,50 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetType> ResourceCopyTargetType
 };
 
 enum class ResourceCopyTargetEvaluationMode : uint32_t {
-	INVALID                = 0b00000000000000000000000000000000,
+	INVALID                   = 0b00000000000000000000000000000000,
 
 	// RESOURCE
-	RESOURCE                 = 0b00000000000000000000000000000001,
-	RESOURCE_IDENTITY        = 0b00000000000000000000000000000010,
-	RESOURCE_STRIDE          = 0b00000000000000000000000000000100,
-	RESOURCE_SOURCE_STRIDE   = 0b00000000000000000000000000001000,
-	RESOURCE_SIZE            = 0b00000000000000000000000000010000,
-	RESOURCE_OFFSET          = 0b00000000000000000000000000100000,
-	RESOURCE_REGION_HASH     = 0b00000000000000000000000001000000,
-	RESOURCE_SPATIAL_HASH    = 0b00000000000000000000000010000000,
-	RESOURCE_REGION          = 0b00000000000000000000000100000000,
-	RESOURCE_FORMAT          = 0b00000000000000000000001000000000,
-	RESOURCE_WIDTH           = 0b00000000000000000000010000000000,
-	RESOURCE_HEIGHT          = 0b00000000000000000000100000000000,
-	RESOURCE_ARRAY           = 0b00000000000000000001000000000000,
-	RESOURCE_MIPS            = 0b00000000000000000010000000000000,
-	RESOURCE_BIND_FLAGS      = 0b00000000000000000100000000000000,
-	RESOURCE_MASK            = 0b00000000000000000111111111111111,
+	RESOURCE                  = 0b00000000000000000000000000000001,
+	RESOURCE_IDENTITY         = 0b00000000000000000000000000000010,
+	RESOURCE_STRIDE           = 0b00000000000000000000000000000100,
+	RESOURCE_SOURCE_STRIDE    = 0b00000000000000000000000000001000,
+	RESOURCE_SIZE             = 0b00000000000000000000000000010000,
+	RESOURCE_OFFSET           = 0b00000000000000000000000000100000,
+	RESOURCE_REGION_HASH      = 0b00000000000000000000000001000000,
+	RESOURCE_SPATIAL_HASH     = 0b00000000000000000000000010000000,
+	RESOURCE_REGION           = 0b00000000000000000000000100000000,
+	RESOURCE_FORMAT           = 0b00000000000000000000001000000000,
+	RESOURCE_WIDTH            = 0b00000000000000000000010000000000,
+	RESOURCE_HEIGHT           = 0b00000000000000000000100000000000,
+	RESOURCE_ARRAY            = 0b00000000000000000001000000000000,
+	RESOURCE_MIPS             = 0b00000000000000000010000000000000,
+	RESOURCE_BIND_FLAGS       = 0b00000000000000000100000000000000,
+	// Placeholder            = 0b00000000000000001000000000000000,
+	RESOURCE_HAMMING_DISTANCE = 0b00000000000000010000000000000000,
+	// Placeholder            = 0b00000000000000100000000000000000,
+	RESOURCE_MASK             = 0b00000000000000111111111111111111,
 
 	// POOL
-	POOL_IDENTITY            = 0b00000000000000001000000000000000,
-	POOL_SIZE                = 0b00000000000000010000000000000000,
-	POOL_INDEX               = 0b00000000000000100000000000000000,
-	POOL_FULL_RANGE_RESOURCE = 0b00000000000001000000000000000000,
-	POOL_FULL_RANGE_VARIABLE = 0b00000000000010000000000000000000,
-	POOL_LAST_FRAME          = 0b00000000000100000000000000000000,
+	POOL_IDENTITY             = 0b00000000000001000000000000000000,
+	POOL_SIZE                 = 0b00000000000010000000000000000000,
+	POOL_INDEX                = 0b00000000000100000000000000000000,
+	POOL_FULL_RANGE_RESOURCE  = 0b00000000001000000000000000000000,
+	POOL_FULL_RANGE_VARIABLE  = 0b00000000010000000000000000000000,
+	POOL_LAST_FRAME           = 0b00000000100000000000000000000000,
+	POOL_RANGE                = 0b00000001000000000000000000000000, // PoolFoo[$a:$b]
 
-	POOL_MASK                = 0b00000000000111111000000000000000,
+	POOL_MASK                 = 0b00000001111111000000000000000000,
 
 	// VARIABLE
-	VARIABLE                 = 0b00000000001000000000000000000000,
+	VARIABLE                  = 0b00000010000000000000000000000000,
 
 	// LAYOUT
-	LAYOUT_ELEMENT_FORMAT    = 0b00000000010000000000000000000000,
-	LAYOUT_ELEMENT_OFFSET    = 0b00000000100000000000000000000000,
+	LAYOUT_ELEMENT_FORMAT     = 0b00000100000000000000000000000000,
+	LAYOUT_ELEMENT_OFFSET     = 0b00001000000000000000000000000000,
+
+	// PIPELINE SLOT
+	SLOT_RANGE                = 0b00010000000000000000000000000000, // ps-t[$a:$b]
+	SLOT_FILTER               = 0b00100000000000000000000000000000, // ps-t[FilterA]
 };
 SENSIBLE_ENUM(ResourceCopyTargetEvaluationMode);
 static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopyTargetEvaluationModeNames[] = {
@@ -853,6 +931,7 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"ResourceHeight", ResourceCopyTargetEvaluationMode::RESOURCE_HEIGHT},
 	{L"ResourceArray", ResourceCopyTargetEvaluationMode::RESOURCE_ARRAY},
 	{L"ResourceMips", ResourceCopyTargetEvaluationMode::RESOURCE_MIPS},
+	{L"ResourceHammingDistance", ResourceCopyTargetEvaluationMode::RESOURCE_HAMMING_DISTANCE},
 	{L"ResourceBindFlags", ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS},
 
 	{L"PoolIdentity", ResourceCopyTargetEvaluationMode::POOL_IDENTITY},
@@ -860,6 +939,8 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"PoolIndex", ResourceCopyTargetEvaluationMode::POOL_INDEX},
 	{L"PoolFullRangeResource", ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_RESOURCE},
 	{L"PoolFullRangeVariable", ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_VARIABLE},
+	{L"PoolRange", ResourceCopyTargetEvaluationMode::POOL_RANGE},
+	{L"SlotRange", ResourceCopyTargetEvaluationMode::SLOT_RANGE},
 
 	{L"Variable", ResourceCopyTargetEvaluationMode::VARIABLE},
 
@@ -879,6 +960,9 @@ struct MemberArg
 		Signed,
 		Unsigned,
 		String,
+		Hash,
+		Resource,
+		Filter,
 	};
 
 	Type type = Type::None;
@@ -886,6 +970,9 @@ struct MemberArg
 	unique_ptr<CommandListExpression> expression;
 
 	std::wstring constant_string;
+	uint64_t constant_hash;
+	std::unique_ptr<ResourceCopyTarget> resource;
+	std::unique_ptr<ResourceFilterTarget> filter;
 
 	float GetValue(CommandListState* state);
 	const std::wstring& GetString() const;
@@ -959,6 +1046,14 @@ enum class ShaderTargetEvaluationMode : uint32_t {
 	DCL_SRV_TYPE       = 0b00000000000000000000000000100000,
 	DCL_SRV_DIMENSION  = 0b00000000000000000000000001000000,
 	DCL_SRV_STRIDE     = 0b00000000000000000000000010000000,
+
+	DCL_CB_SLOT_COUNT  = 0b00000000000000000000000100000000,
+	DCL_CB_FIRST_SLOT  = 0b00000000000000000000001000000000,
+	DCL_CB_LAST_SLOT   = 0b00000000000000000000010000000000,
+
+	DCL_SRV_SLOT_COUNT = 0b00000000000000000000100000000000,
+	DCL_SRV_FIRST_SLOT = 0b00000000000000000001000000000000,
+	DCL_SRV_LAST_SLOT  = 0b00000000000000000010000000000000,
 };
 SENSIBLE_ENUM(ShaderTargetEvaluationMode);
 //static EnumName_t<const wchar_t*, ShaderTargetEvaluationMode> ShaderTargetEvaluationModeNames[] = {
@@ -1002,13 +1097,29 @@ public:
 	std::unique_ptr<CommandListExpression> slot_expression = nullptr;
 	unsigned max_slot = 0;
 
+	// Inclusive bounds for SLOT_RANGE (ps-t[$a:$b]) and POOL_RANGE
+	// (PoolFoo[$a:$b]) targets. Null for a bare "ps-t" / "PoolFoo" side,
+	// which inherits the other side's bounds:
+	std::unique_ptr<CommandListExpression> range_start = nullptr;
+	std::unique_ptr<CommandListExpression> range_end = nullptr;
+
+	ResourceFilter* slot_filter = nullptr;
+
 	bool forbid_view_cache = false;
 
-	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true);
+	// allow_range: accept ps-t[$a:$b] / PoolFoo[$a:$b] / bare ps-t targets,
+	// only meaningful for commands that iterate the range.
+	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false);
+	bool IsRange() const;
 
 	// Slot for this draw, or UINT_MAX (with a warning) if a dynamic slot
 	// expression is out of range:
 	unsigned ResolveSlot(CommandListState *state);
+	// Range bounds for this draw; false (with a warning) if invalid. Pool
+	// bounds may be negative or past the end, they wrap like PoolFoo[-1]:
+	bool ResolveRange(CommandListState *state, int *first, unsigned *count);
+	// Pool size or slot count, whichever bounds this target's range:
+	unsigned RangeLimit();
 
 	void SetCustomResource(CustomResource* resource);
 
@@ -1017,6 +1128,7 @@ public:
 
 	CustomResource* GetCustomResource(CommandListState* state, bool is_assignment = false);
 	CommandListVariable* GetPoolVariable(CommandListState* state, bool is_assignment = false);
+	ResourceFilter* GetSlotFilter() { return slot_filter ? slot_filter->ResolveFilter() : nullptr; };
 
 	ID3D11Resource *GetResource(CommandListState *state,
 			ID3D11View **view,
@@ -1050,12 +1162,15 @@ public:
 	float GetResourceHeight(CommandListState* state);
 	float GetResourceArray(CommandListState* state);
 	float GetResourceMips(CommandListState* state);
+	float GetResourceHammingDistance(CommandListState* state);
 	D3D11_BIND_FLAG GetResourceBindFlags(CommandListState *state);
 	float GetPoolElementLastFrame(CommandListState* state);
 
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
 private:
+	bool AcceptParsedTarget(IniParserResult ret, bool allow_range) const;
+	bool ParseRangeBounds(const wstring& text, size_t colon, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPrefix(const wchar_t*& target, size_t& length);
 	IniParserResult ParseTargetMember(const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source, const wstring* ini_namespace, CommandListScope* scope);
@@ -1123,6 +1238,72 @@ static EnumName_t<const wchar_t *, ResourceCopyOptions> ResourceCopyOptionNames[
 // overwrite - instead of creating a new resource for a copy operation, overwrite the resource already assigned to the destination (if it exists and is compatible)
 
 
+enum class ResourceFilterTargetType : uint32_t {
+	INVALID = 0b00000000000000000000000000000000,
+
+	FILTER = 0b00000000000000000000000000000001,
+	EMPTY = 0b00000000000000000000000000000010,
+};
+SENSIBLE_ENUM(ResourceFilterTargetType);
+static EnumName_t<const wchar_t*, ResourceFilterTargetType> ResourceFilterTypeNames[] = {
+	{L"Filter", ResourceFilterTargetType::FILTER},
+	{L"Empty", ResourceFilterTargetType::EMPTY},
+
+	{NULL, ResourceFilterTargetType::INVALID} // End of list marker
+};
+
+enum class ResourceFilterTargetEvaluationMode : uint32_t {
+	INVALID         = 0b00000000000000000000000000000000,
+
+	FILTER_IDENTITY = 0b00000000000000000000000000000001,
+	FORMAT          = 0b00000000000000000000000000000010,
+	CONFIDENCE      = 0b00000000000000000000000000000100,
+};
+SENSIBLE_ENUM(ResourceFilterTargetEvaluationMode);
+static EnumName_t<const wchar_t*, ResourceFilterTargetEvaluationMode> ResourceFilterTargetEvaluationModeNames[] = {
+	{L"FilterIdentity", ResourceFilterTargetEvaluationMode::FILTER_IDENTITY},
+	{L"Format", ResourceFilterTargetEvaluationMode::FORMAT},
+	{L"Confidence", ResourceFilterTargetEvaluationMode::CONFIDENCE},
+
+	{NULL, ResourceFilterTargetEvaluationMode::INVALID} // End of list marker
+};
+
+class ResourceFilterTarget : public SyntaxTarget
+{
+public:
+	using MemberInfo = SyntaxTarget::MemberInfo<ResourceFilterTargetEvaluationMode>;
+
+	ResourceFilterTargetType type = ResourceFilterTargetType::INVALID;
+	ResourceFilterTargetEvaluationMode evaluation_mode = ResourceFilterTargetEvaluationMode::INVALID;
+
+	bool ParseTarget(const wchar_t* target, bool is_source, const wstring* ini_namespace, CommandListScope* scope);
+	ResourceFilter* GetFilter() { return filter ? filter->ResolveFilter() : nullptr; }
+
+	float GetFilterId(CommandListState* state);
+
+	ResourceFilter* filter = nullptr;
+
+private:
+	IniParserResult ParseTargetPrefix(const wchar_t*& target, size_t& length);
+	IniParserResult ParseTargetMember(const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope);
+};
+
+
+class ResourceFilterCopyOperation : public CommandListCommand {
+public:
+	ResourceFilterTarget src;
+	ResourceFilterTarget dst;
+	ResourceCopyOptions options;
+
+	void CopyFilterToFilter(CommandListState* state);
+
+	void run(CommandListState*) override;
+
+private:
+	ResourceFilter* failed_root = nullptr;
+};
+
+
 // What a ResourceCopyOperation would have bound to its destination slot,
 // collected by a batch so several slots can be set with one call. The
 // references are owned by the batch.
@@ -1132,6 +1313,14 @@ struct DeferredBinding {
 	UINT offset = 0;   // Constant buffers only, in bytes
 	UINT size = 0;
 	bool assigned = false; // false: unless_null kept the current binding
+};
+
+// Which side of a batchable copy the batch owns:
+// a bind batch drives the destination slot, a fetch batch reads the source.
+// Everything in the optimiser that differs between the two is selected by this.
+enum class BatchDirection {
+	Bind,
+	Fetch,
 };
 
 class ResourceCopyOperation : public CommandListCommand {
@@ -1156,7 +1345,12 @@ public:
 
 	void run(CommandListState*) override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
-	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
+	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
+	// The slot a batch groups this operation by.
+	// A folded if/elif/else chain overrides it:
+	// the slot it drives is its branches', not its own.
+	virtual const ResourceCopyTarget& BatchTarget(BatchDirection direction) const;
+	virtual bool IsBatchable() const { return true; }
 
 private:
 	void SetOrDeferResource(CommandListState* state, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
@@ -1193,7 +1387,80 @@ public:
 	void run(CommandListState*) override;
 };
 
+// One branch of an if/elif/else chain folded into a ConditionalSlotCopyOperation:
+// condition is NULL for the unconditional terminal branch,
+// the else, or the "no branch taken" sentinel below.
+// op is NULL when that branch makes no assignment at all:
+// a missing else leaves the current binding, the same as unless_null.
+struct ConditionalSlotBranch {
+	CommandListExpression *condition;
+	std::shared_ptr<ResourceCopyOperation> op;
+};
+
+// A chain of if/elif/else where every reachable branch targets the same slot,
+// always a fixed one, folded by the optimiser into a single operation.
+// It can then sit inside a ShaderResourceBindBatch/FetchBatch,
+// instead of acting as a hard break.
+//
+// The conditions are evaluated at run time, and whichever branch matched runs.
+// Its own dst/src are never used:
+// the copy belongs to the branch, and the batch groups by BatchTarget().
+class ConditionalSlotCopyOperation : public ResourceCopyOperation {
+public:
+	BatchDirection direction = BatchDirection::Bind;
+	std::vector<ConditionalSlotBranch> branches;
+	// The chain this was folded from, held for two reasons:
+	// `branches` points into its CommandListExpressions,
+	// and an operation left out of a batch goes back in as the chain itself:
+	std::shared_ptr<CommandListCommand> source_if;
+
+	void run(CommandListState*) override;
+	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view) override;
+	const ResourceCopyTarget& BatchTarget(BatchDirection direction) const override;
+
+private:
+	// The branch whose condition holds, or NULL when no branch is taken:
+	ConditionalSlotBranch* MatchingBranch(CommandListState *state);
+};
+
 void merge_shader_resource_batches(CommandList *command_list);
+
+// "<stage>-t[$a:$b] = ref PoolFoo[$c:$d]" / "= ref ResourceFoo" / "= null" and
+struct SlotRangeBindings;
+
+// "PoolFoo[$c:$d] = ref <stage>-t[$a:$b]" for t, u and cb slots. Bounds are
+// evaluated per run and the whole range goes through one XXGet/Set call.
+class SlotRangeCopyOperation : public CommandListCommand {
+public:
+	ResourceCopyTarget src;
+	ResourceCopyTarget dst;
+	ResourceCopyOptions options = ResourceCopyOptions::INVALID;
+
+	~SlotRangeCopyOperation();
+
+	void run(CommandListState*) override;
+	bool optimise(HackerDevice *device) override;
+
+private:
+	// One cached view per slot for binds that need a view of the slot's
+	// type created for the source resource:
+	std::vector<ID3D11View*> cached_views;
+	// Plain ref copies are done inline; anything else runs a regular
+	// single slot operation per slot and only shares the bind call:
+	std::vector<std::unique_ptr<ResourceCopyOperation>> slot_ops;
+
+	bool UsesSlotOps() const;
+	ResourceCopyOperation* SlotOp(unsigned index, unsigned slot);
+	void RunBind(CommandListState *state, unsigned first, unsigned count, int pool_first);
+	void RunFetch(CommandListState *state, unsigned first, unsigned count, int pool_first);
+	// One slot of the range each, index into the bindings and slot on the
+	// pipeline. The fetch pair borrows the slot's resource from the caller:
+	void BindSlotOp(CommandListState *state, SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *source);
+	void BindSlotRef(CommandListState *state, SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *source);
+	void FetchSlotOp(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
+	void FetchSlotRef(CommandListState *state, const SlotRangeBindings &bindings, unsigned index, unsigned slot, CustomResource *element, ID3D11Resource *resource);
+	ID3D11View* ViewForSlot(CommandListState *state, unsigned index, ID3D11Resource *resource, ID3D11View *src_view);
+};
 
 class PoolCopyOperation : public CommandListCommand {
 public:
@@ -1207,6 +1474,36 @@ public:
 
 private:
 	CustomResourcePool* failed_root = nullptr;
+};
+
+class SnapshotInitialTexturesOperation : public CommandListCommand
+{
+public:
+	void run(CommandListState* state) override;
+};
+
+class RestoreInitialTexturesOperation : public ResourceCopyOperation
+{
+public:
+	RestoreInitialTexturesOperation();
+
+	void run(CommandListState* state) override;
+
+	bool IsBatchable() const override { return false; }
+};
+
+class SlotFilterOperation : public ResourceCopyOperation
+{
+public:
+	static constexpr UINT SLOT_COUNT = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+
+	void ReplaceBestMatchingTextures(CommandListState* state, ID3D11Resource* source_resource, ID3D11View* source_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, const std::array<uint8_t, SLOT_COUNT>& distances, unsigned best_distance);
+
+	void OverrideMatchingTextures(CommandListState* state);
+
+	void run(CommandListState*) override;
+
+	bool IsBatchable() const override { return false; }
 };
 
 class LayoutElementOperation : public CommandListCommand {
@@ -1421,6 +1718,7 @@ enum class ParamOverrideType {
 	DISPATCH_NUMBER,
 	FRAME_TIME,
 	FPS,
+	RESOURCE_FILTER,
 };
 static EnumName_t<const wchar_t *, ParamOverrideType> ParamOverrideTypeNames[] = {
 	{L"rt_width", ParamOverrideType::RT_WIDTH},
@@ -1465,6 +1763,7 @@ static EnumName_t<const wchar_t *, ParamOverrideType> ParamOverrideTypeNames[] =
 	{L"dispatch_number", ParamOverrideType::DISPATCH_NUMBER},
 	{L"frame_time", ParamOverrideType::FRAME_TIME},
 	{L"fps", ParamOverrideType::FPS},
+	{L"resource_filter", ParamOverrideType::RESOURCE_FILTER},
 	{NULL, ParamOverrideType::INVALID} // End of list marker
 };
 class CommandListOperand :
@@ -1473,6 +1772,7 @@ class CommandListOperand :
 	public CommandListEvaluatable {
 	float process_texture_filter(CommandListState*);
 	float process_shader_filter(CommandListState*);
+	float process_resource_filter(CommandListState*);
 public:
 	// TODO: Break up into separate classes for each operand type
 	ParamOverrideType type;
@@ -1488,6 +1788,7 @@ public:
 	// For texture filters:
 	ResourceCopyTarget texture_filter_target;
 	ShaderTarget shader_target;
+	ResourceFilterTarget filter_target;
 
 	// For scissor rectangle:
 	unsigned scissor;
@@ -1508,6 +1809,7 @@ public:
 	bool parse_slot(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_target(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_shader(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
+	bool parse_resource_filter(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_scissor(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_ini_keywords(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 
@@ -1668,11 +1970,30 @@ class StoreCommand : public CommandListCommand {
 public:
 	ResourceCopyTarget src;
 	CommandListVariable* var = nullptr;
+	ResourceCopyTarget pool_var;
 	unique_ptr<CommandListExpression> offset_expression;
 
 	wstring ini_section;
 
 	void run(CommandListState*) override;
+
+	bool CalculateCopyRegion(
+		const D3D11_BUFFER_DESC& desc,
+		const UINT value_size,
+		UINT64 value_byte_offset,
+		UINT64* copy_offset,
+		UINT64* copy_size,
+		UINT* value_offset);
+	bool ReadValueFromGPU(
+		HackerContext* hacker_context,
+		ID3D11DeviceContext* orig_context,
+		ID3D11Resource* src_resource,
+		UINT64 copy_offset,
+		UINT64 copy_size,
+		UINT value_offset,
+		float& value);
+	bool TryReadValueFromCache(ID3D11Resource* resource, UINT64 byte_offset, float& value);
+	void SetOutputValue(CommandListState* state, float value);
 };
 
 class ClearViewCommand : public CommandListCommand {
@@ -1804,6 +2125,9 @@ bool ParseCommandListVariableAssignment(const wchar_t *section,
 bool ParseCommandListResourceCopyTargetDirective(const wchar_t *section,
 		const wchar_t *key, wstring *val, CommandList *command_list,
 		const wstring *ini_namespace);
+bool ParseCommandListResourceFilterTargetDirective(const wchar_t* section,
+		const wchar_t* key, wstring* val, CommandList* command_list,
+		const wstring* ini_namespace);
 bool ParseCommandListFlowControl(const wchar_t *section, const wstring *line,
 		CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace);
@@ -1848,8 +2172,10 @@ public:
 	template<typename T>
 	bool GetEnum(const EnumName_t<const wchar_t*, T>* names, T invalid, T* out);
 	bool GetVariable(CommandListVariable*& out, bool is_source, PeekMode mode = PeekMode::Token);
-	bool GetTarget(ResourceCopyTarget* out, bool is_source, PeekMode mode = PeekMode::Token, bool validate = true);
+	bool GetTarget(ResourceCopyTarget* out, bool is_source, PeekMode mode = PeekMode::Token, bool validate = true, bool allow_range = false);
+	bool GetFilter(ResourceFilterTarget* out, bool is_source, PeekMode mode = PeekMode::Token, bool validate = true);
 	bool GetFloat(float* out);
+	bool GetHash(uint64_t* out);
 	bool GetExpression(unique_ptr<CommandListExpression>* out);
 
 	bool ConsumeSeparator(SeparatorMode separator_mode);
