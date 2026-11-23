@@ -51,16 +51,40 @@ struct ShaderResource
 	uint32_t stride = 0;
 };
 
+struct ShaderSlotRange
+{
+	uint32_t first = 0;
+	uint32_t last = 0;
+	uint32_t count = 0;
+
+	void include(uint32_t slot) noexcept
+	{
+		if (count == 0)
+			first = last = slot;
+
+		if (slot < first)
+			first = slot;
+
+		if (slot > last)
+			last = slot;
+
+		++count;
+	}
+};
+
 struct ShaderBindings
 {
 	std::array<ShaderConstantBuffer, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers{};
 	std::array<ShaderResource, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> resources{};
+
+	ShaderSlotRange constant_buffer_slots{};
+	ShaderSlotRange resource_slots{};
 };
 
 void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required);
 bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline);
-ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline);
-void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode);
+ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte_t> *bytecode, std::wstring *tagline);
+void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector<byte_t> *bytecode);
 bool unlink_shader_regex_command_lists_and_filter_index(UINT64 shader_hash);
 
 typedef std::set<std::string> ShaderRegexTemps;

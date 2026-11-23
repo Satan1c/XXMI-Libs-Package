@@ -885,7 +885,7 @@ static bool ReplaceASMShader(__in UINT64 hash, const wchar_t *pShaderType, const
 			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
 			pHeaderLine = utf8_to_utf16.from_bytes(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
 
-			vector<byte> byteCode(pBytecodeLength);
+			vector<byte_t> byteCode(pBytecodeLength);
 			memcpy(byteCode.data(), pShaderBytecode, pBytecodeLength);
 
 			// Re-assemble the ASM text back to binary
@@ -2343,6 +2343,9 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	// Register texture. Every one seen.
 	if (hr == S_OK && ppTexture2D)
 	{
+		D3D11_TEXTURE2D_DESC actualDesc = {};
+		(*ppTexture2D)->GetDesc(&actualDesc);
+
 		EnterCriticalSectionPretty(&G->mResourcesLock);
 			ResourceHandleInfo *handle_info = &G->mResources[*ppTexture2D];
 			new ResourceReleaseTracker(*ppTexture2D);
@@ -2350,9 +2353,11 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->InitializeSubresourceTracking(actualDesc.MipLevels, actualDesc.ArraySize, pInitialData != nullptr);
 			if (pDesc)
 				memcpy(&handle_info->desc2D, pDesc, sizeof(D3D11_TEXTURE2D_DESC));
 		LeaveCriticalSection(&G->mResourcesLock);
+
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 			if (G->hunting && pDesc) {
 				G->mResourceInfo[hash] = *pDesc;
