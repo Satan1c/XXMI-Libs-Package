@@ -64,6 +64,7 @@ static Section CommandListSections[] = {
 static Section RegularSections[] = {
 	{L"Pool", true},
 	{L"Resource", true},
+	{L"Filter", true},
 	{L"Key", true},
 	{L"Include", true}, // Prefix so that it may be namespaced to allow included files to include more files with relative paths
 	{L"Preset", true},
@@ -2206,6 +2207,58 @@ static void ParseResourceSections()
 	}
 }
 
+static ResourceFilter* ParseFilterSection(const wchar_t* section_name)
+{
+	wchar_t setting[MAX_PATH];
+
+	wstring filter_id(section_name);
+
+	// Convert section name to lower case so our keys will be consistent in the unordered_map:
+	std::transform(filter_id.begin(), filter_id.end(), filter_id.begin(), ::towlower);
+
+	ResourceFilter* filter = &resourceFilters[filter_id];
+	filter->name = filter_id;
+
+	if (GetIniString(section_name, L"match_format", 0, setting, MAX_PATH)) {
+		filter->match_format = ParseFormatString(setting, true);
+		if (filter->match_format == (DXGI_FORMAT)-1) {
+			IniWarningW(L"Unknown match_format \"%ls\"\n - [%ls]\n", setting, section_name);
+		}
+		else {
+			LogInfo("  match_format=%s\n", TexFormatStr(filter->match_format));
+			filter->is_empty = false;
+		}
+	}
+
+	bool found = false;
+	filter->match_dhash = GetIniHash(section_name, L"match_dhash", 0, &found);
+	if (found)
+		filter->is_empty = false;
+
+	filter->match_confidence = GetIniFloat(section_name, L"match_confidence", 0.75f, &found);
+	filter->match_confidence = min(max(0.0f, filter->match_confidence), 1.0f);
+	if (found)
+		filter->is_empty = false;
+
+	return filter;
+}
+
+static void ParseFilterSections()
+{
+	resourceFilters.clear();
+
+	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Filter"));
+	IniSections::iterator upper = prefix_upper_bound(ini_sections, wstring(L"Filter"));
+
+	for (IniSections::iterator i = lower; i != upper; i++) {
+		wstring section_name = i->first;
+
+		LogInfoW(L"[%s]\n", section_name.c_str());
+
+		ParseFilterSection(section_name.c_str());
+	}
+}
+
 static bool ParseCommandListLine(const wchar_t *ini_section,
 		const wchar_t *lhs, wstring *rhs, wstring *raw_line,
 		CommandList *command_list,
@@ -2231,6 +2284,9 @@ static bool ParseCommandListLine(const wchar_t *ini_section,
 		return true;
 
 	if (ParseCommandListResourceCopyTargetDirective(ini_section, lhs, rhs, command_list, ini_namespace))
+		return true;
+
+	if (ParseCommandListResourceFilterTargetDirective(ini_section, lhs, rhs, command_list, ini_namespace))
 		return true;
 
 	return false;
@@ -4681,6 +4737,9 @@ void LoadConfigFile()
 	G->shader_hash_type = GetIniEnumClass(L"Rendering", L"shader_hash", ShaderHashType::FNV, NULL, ShaderHashNames);
 	G->texture_hash_version = GetIniInt(L"Rendering", L"texture_hash", 0, NULL);
 
+	G->dhash_mip_size = GetIniInt(L"Rendering", L"dhash_mip_size", 256, NULL);
+	G->dhash_allow_rehash = GetIniBool(L"Rendering", L"dhash_allow_rehash", false, NULL);
+
 	if (GetIniStringAndLog(L"Rendering", L"override_directory", 0, G->SHADER_PATH, MAX_PATH))
 	{
 		while (G->SHADER_PATH[wcslen(G->SHADER_PATH) - 1] == L' ')
@@ -4713,7 +4772,24 @@ void LoadConfigFile()
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
+
+	if (GetIniStringAndLog(L"Rendering", L"cache_resource_data", 0, setting, MAX_PATH)) {
+		if (wcscmp(setting, L"none") == 0)
+			G->cache_resource_data = DataCacheBindFlags::INVALID;
+		else
+			G->cache_resource_data = parse_enum_option_string<const wchar_t*, DataCacheBindFlags, wchar_t*>
+				(DataCacheBindFlagNames, setting, NULL);
+	}
+
 	G->track_region_hashes = GetIniBool(L"Rendering", L"track_region_hashes", false, NULL);
+	// Force enable IB and VB data caching, since efficient region hashing requires data to be in RAM.
+	if (G->track_region_hashes) {
+		G->cache_resource_data |= DataCacheBindFlags::INDEX_BUFFER;
+		G->cache_resource_data |= DataCacheBindFlags::VERTEX_BUFFER;
+		// CB caching is not really required, but lets keep it there until everyone gets updated EFMI and XXMI Launcher.
+		G->cache_resource_data |= DataCacheBindFlags::CONSTANT_BUFFER;  // TODO: Remove after a grace period.
+	}
+
 	G->track_implicit_index_buffers = GetIniBool(L"Rendering", L"track_implicit_index_buffers", false, NULL);
 	G->allow_buffer_resize = GetIniBool(L"Rendering", L"allow_buffer_resize", true, NULL);
 	G->assemble_signature_comments = GetIniBool(L"Rendering", L"assemble_signature_comments", false, NULL);
@@ -4858,6 +4934,7 @@ void LoadConfigFile()
 	ParseConstantsSection();
 
 	// Must be done before any command lists that may refer to them:
+	ParseFilterSections();
 	ParseResourceSections();
 
 	// Second pass for the Constants command list:
