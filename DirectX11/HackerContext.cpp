@@ -25,6 +25,8 @@
 #include "FrameAnalysis.h"
 #include "profiling.h"
 
+#include <bit>
+
 // -----------------------------------------------------------------------------------------------
 
 HackerContext* HackerContextFactory(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1)
@@ -536,7 +538,7 @@ template <class ID3D11Shader,
 	void (__stdcall ID3D11DeviceContext::*SetShaderVS2013BUGWORKAROUND)(ID3D11Shader*, ID3D11ClassInstance*const*, UINT),
 	HRESULT (__stdcall ID3D11Device::*CreateShader)(const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11Shader**)
 >
-void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 hash, wchar_t *shader_type)
+void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 hash, const wchar_t *shader_type)
 {
 	ID3D11Shader *orig_shader = NULL, *patched_shader = NULL;
 	ID3D11ClassInstance *class_instances[256];
@@ -775,29 +777,12 @@ void HackerContext::DeferredShaderReplacementBeforeDispatch()
 		(mCurrentComputeShaderHandle, mCurrentComputeShader, L"cs");
 }
 
-static UINT NextPow2(UINT v)
-{
-	// TODO: C++20
-	// return v <= 1 ? 1 : std::bit_ceil(v);
-	if (v <= 1)
-		return 1;
-
-	--v;
-	v |= v >> 1;
-	v |= v >> 2;
-	v |= v >> 4;
-	v |= v >> 8;
-	v |= v >> 16;
-
-	return ++v;
-}
-
 ID3D11Buffer* HackerContext::GetReadbackBuffer(UINT size)
 {
 	// Round the requested size up to the next power of two so buffers
 	// can be reused across similarly sized requests instead of creating
 	// a unique staging buffer for every size.
-	UINT bucket = NextPow2(size);
+	UINT bucket = std::bit_ceil(size);
 
 	// Reuse an existing staging buffer for this size bucket if available.
 	ID3D11Buffer** existing = mReadbackBuffers.find_ptr(bucket);
@@ -1526,6 +1511,9 @@ void UpdateResourceDataCacheFromMap(ID3D11Resource* pResource, void* data, size_
 void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresource)
 {
 	Profiling::State profiling_state;
+	bool deallocate_diverted_memory;
+	MappedResources::mapped_type::iterator subresource_it;
+	MappedResourceInfo* map_info;
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::start(&profiling_state);
@@ -1535,14 +1523,14 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 	if (resource_it == mMappedResources.end())
 		goto out_profile;
 
-	auto subresource_it = resource_it->second.find(Subresource);
+	subresource_it = resource_it->second.find(Subresource);
 
 	if (subresource_it == resource_it->second.end())
 		goto out_profile;
 
-	MappedResourceInfo* map_info = &subresource_it->second;
+	map_info = &subresource_it->second;
 
-	bool deallocate_diverted_memory = true;
+	deallocate_diverted_memory = true;
 
 	if ((map_info->bind_flags & (D3D11_BIND_FLAG)G->cache_resource_data) != 0)
 		UpdateResourceDataCacheFromMap(pResource, map_info->map.pData, map_info->size, &deallocate_diverted_memory);
@@ -2026,7 +2014,7 @@ void CopySubresourceRegionCache(ID3D11Resource* pSrcResource, ID3D11Resource* pD
 
 		// If range is not specified, we must copy the entire src buffer.
 		if (!region_size)
-			region_size = src_info->cached_data_size;
+			region_size = (UINT)src_info->cached_data_size;
 
 		// Initialize new cache of dst size.
 		if (!dst_info->cached_data_size)

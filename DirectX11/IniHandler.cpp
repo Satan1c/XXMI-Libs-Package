@@ -1,14 +1,15 @@
 #include "IniHandler.h"
 
 #include <algorithm>
+#include <charconv>
 #include <iterator>
 #include <string>
 #include <strsafe.h>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 #include <memory>
 #include <pcre2.h>
-#include <codecvt>
 
 #include "log.h"
 #include "Globals.h"
@@ -37,7 +38,7 @@
 // ParseCommandList will terminate the program if it is called on a section not
 // listed here to make sure we never forget to update this.
 struct Section {
-	wchar_t *section;
+	const wchar_t *section;
 	bool prefix;
 };
 static Section CommandListSections[] = {
@@ -150,7 +151,7 @@ static const wchar_t* SectionPrefixFromList(const wchar_t *section, Section sect
 		}
 	}
 
-	return false;
+	return nullptr;
 }
 
 static const wchar_t* SectionPrefix(const wchar_t *section)
@@ -224,7 +225,7 @@ std::unordered_set<wstring> recursive_includes;
 // prefix in a case insensitive way. Combined with set::lower_bound, this can
 // be used to iterate over all elements in the sections set that begin with a
 // given prefix.
-static IniSections::iterator prefix_upper_bound(IniSections &sections, wstring &prefix)
+static IniSections::iterator prefix_upper_bound(IniSections &sections, const wstring &prefix)
 {
 	IniSections::iterator i;
 
@@ -659,13 +660,26 @@ static void ParseIniExcerpt(const wchar_t *excerpt)
 // it, make sure you delay calling it until after the log file has been opened!
 static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namespace)
 {
-	wifstream f(ini, ios::in, _SH_DENYNO);
+	// Read the file as UTF-8 (text mode, as the wifstream was) and convert
+	// it up front rather than imbuing a wifstream with the deprecated
+	// <codecvt> facet.
+	FILE *f = _wfsopen(ini, L"rt", _SH_DENYNO);
 	if (!f) {
 		LogOverlay(LOG_WARNING, "  Error opening %S\n", ini);
 		return;
 	}
-	f.imbue(std::locale(f.getloc(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::consume_header>));
-	ParseIniStream(&f, ini_namespace);
+	string bytes;
+	char buf[4096];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+		bytes.append(buf, n);
+	fclose(f);
+
+	// Skip a UTF-8 BOM if present (the old consume_header facet did this).
+	size_t start = (bytes.size() >= 3 && (unsigned char)bytes[0] == 0xEF && (unsigned char)bytes[1] == 0xBB && (unsigned char)bytes[2] == 0xBF) ? 3 : 0;
+
+	std::wistringstream stream(utf8_to_wstring(bytes.data() + start, bytes.data() + bytes.size()));
+	ParseIniStream(&stream, ini_namespace);
 }
 
 static void ParseIniFile(const wchar_t *ini)
@@ -729,7 +743,7 @@ static pcre2_code* glob_to_regex(wstring &pattern)
 	return regex;
 }
 
-static vector<pcre2_code*> globbing_vector_to_regex(vector<wstring> &globbing_patterns)
+static vector<pcre2_code*> globbing_vector_to_regex(const vector<wstring> &globbing_patterns)
 {
 	vector<pcre2_code*> ret;
 	pcre2_code *regex;
@@ -1032,7 +1046,7 @@ inline std::wstring NormalizeString(const std::wstring& value)
 	return normalized;
 }
 
-bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size_t& length)
+bool ParseBinaryLiterals(std::wstring_view input, size_t start, uint64_t& out, size_t& length)
 {
 	uint64_t value = 0;
 	length = 0;
@@ -1058,6 +1072,40 @@ bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size
 		return false;
 
 	out = value;
+	return true;
+}
+
+// std::from_chars reports overflow and underflow alike as
+// errc::result_out_of_range and leaves the output untouched, but callers
+// want ±inf for overflow and ±0 for underflow (what strtof produces).
+// Tells the two apart for the literal in [first, last) that a float
+// from_chars call with the same `format` already accepted up to `last`.
+//
+// A double parse settles anything between float and double range
+// (1e-50, 1e300). If even that is out of range the text decides: a
+// negative exponent (1e-999) or, without an exponent, an all-zero integer
+// part (0.000...0001) means the value is tiny; anything else is huge.
+bool FloatLiteralUnderflows(const char* first, const char* last, std::chars_format format)
+{
+	double wide;
+	std::from_chars_result result = std::from_chars(first, last, wide, format);
+	if (result.ec == std::errc())
+		return std::fabs(wide) < 1.0;
+
+	// Hex literals use 'p' for the exponent ('e' is a digit there).
+	const bool hex = format == std::chars_format::hex;
+	for (const char* p = first; p != last; ++p)
+	{
+		const bool exponent = hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E');
+		if (exponent)
+			return p + 1 != last && p[1] == '-';
+	}
+
+	for (const char* p = first; p != last && *p != '.'; ++p)
+	{
+		if (*p != '0' && *p != '+' && *p != '-')
+			return false;
+	}
 	return true;
 }
 
@@ -1176,20 +1224,43 @@ inline bool ConvertExpressionToFloat(float expr, float& out) noexcept
 	return true;
 }
 
+// std::from_chars only accepts narrow characters. Numeric literals are pure
+// ASCII, so a value containing anything else is left to the expression parser.
+static bool NarrowNumericLiteral(const wstring& val, std::string& out)
+{
+	out.clear();
+	out.reserve(val.size());
+
+	for (wchar_t c : val)
+	{
+		if (c > 0x7F)
+			return false;
+		out.push_back(static_cast<char>(c));
+	}
+
+	return true;
+}
+
 bool ParseFloatValue(const wchar_t* section, const wchar_t* key, const wstring& val, float& out, bool warn = true, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	out = std::wcstof(val.c_str(), &end); // TODO: C++17: use std::from_chars.
-	
-	if (*end == L'\0')
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
 	{
-		if (errno == ERANGE)
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		auto [ptr, ec] = std::from_chars(first, last, out);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Treat floating-point overflow as ±infinity.
-			out = std::signbit(out) ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+			if (ec == std::errc::result_out_of_range)
+			{
+				// from_chars left `out` untouched: overflow -> ±inf, underflow -> ±0.
+				float magnitude = FloatLiteralUnderflows(first, ptr, std::chars_format::general) ? 0.0f : std::numeric_limits<float>::infinity();
+				out = (narrow[0] == '-') ? -magnitude : magnitude;
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToFloat);
@@ -1222,26 +1293,33 @@ inline bool ConvertExpressionToInt(float expr, int& out) noexcept
 
 bool ParseIntValue(const wchar_t* section, const wchar_t* key, const wstring& val, int& out, bool warn = false, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	long long n = std::wcstoll(val.c_str(), &end, 10); // TODO: C++17: use std::from_chars
-	
-	if (*end == L'\0') {
-		if (errno == ERANGE)
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
+	{
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		long long n = 0;
+		auto [ptr, ec] = std::from_chars(first, last, n, 10);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Saturate integer literal overflow.
-			out = (n < 0) ? INT_MIN : INT_MAX;
-		}
-		else
-		{
-			if (n < INT_MIN)
-				out = INT_MIN;
-			else if (n > INT_MAX)
-				out = INT_MAX;
+			if (ec == std::errc::result_out_of_range)
+			{
+				// Saturate integer literal overflow.
+				out = (narrow[0] == '-') ? INT_MIN : INT_MAX;
+			}
 			else
-				out = static_cast<int>(n);
+			{
+				if (n < INT_MIN)
+					out = INT_MIN;
+				else if (n > INT_MAX)
+					out = INT_MAX;
+				else
+					out = static_cast<int>(n);
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToInt);
@@ -1344,10 +1422,10 @@ static int GetIniHexString(const wchar_t *section, const wchar_t *key, int def, 
 // VS2013 BUG WORKAROUND: Make sure this class has a unique type name!
 class EnumParseError: public exception {} enumParseError;
 
-static int ParseEnum(wchar_t *str, wchar_t *prefix, wchar_t *names[], int names_len, int first)
+static int ParseEnum(const wchar_t *str, const wchar_t *prefix, const wchar_t *names[], int names_len, int first)
 {
 	size_t prefix_len;
-	wchar_t *ptr = str;
+	const wchar_t *ptr = str;
 	int i;
 
 	if (prefix) {
@@ -1365,7 +1443,7 @@ static int ParseEnum(wchar_t *str, wchar_t *prefix, wchar_t *names[], int names_
 }
 
 static int GetIniEnum(const wchar_t *section, const wchar_t *key, int def, bool *found,
-		wchar_t *prefix, wchar_t *names[], int names_len, int first)
+		const wchar_t *prefix, const wchar_t *names[], int names_len, int first)
 {
 	wchar_t val[MAX_PATH];
 	int ret = def;
@@ -1478,7 +1556,7 @@ static int GetIniBoolOrInt(const wchar_t *section, const wchar_t *key, int def, 
 // backwards compatibility, integers will return the integer value (provided it
 // is within the range of the enum), otherwise the enum will be used.
 static int GetIniBoolIntOrEnum(const wchar_t *section, const wchar_t *key, int def, bool *found,
-		wchar_t *prefix, wchar_t *names[], int names_len, int first)
+		const wchar_t *prefix, const wchar_t *names[], int names_len, int first)
 {
 	int ret;
 	bool tmp_found;
@@ -1719,37 +1797,37 @@ static void ParsePresetOverrideSections()
 	}
 }
 
-static char* type_to_format(float type)
+static const char* type_to_format(float type)
 {
 	return "%f%n";
 }
 
-static char* type_to_format(unsigned int type)
+static const char* type_to_format(unsigned int type)
 {
 	return "%u%n";
 }
 
-static char* type_to_format(signed int type)
+static const char* type_to_format(signed int type)
 {
 	return "%i%n";
 }
 
-static char* type_to_format(unsigned short type)
+static const char* type_to_format(unsigned short type)
 {
 	return "%hu%n";
 }
 
-static char* type_to_format(signed short type)
+static const char* type_to_format(signed short type)
 {
 	return "%hi%n";
 }
 
-static char* type_to_format(unsigned char type)
+static const char* type_to_format(unsigned char type)
 {
 	return "%hhu%n";
 }
 
-static char* type_to_format(signed char type)
+static const char* type_to_format(signed char type)
 {
 	return "%hhi%n";
 }
@@ -2305,7 +2383,7 @@ static bool ParseCommandListLine(const wchar_t *ini_section,
 // part of the command list.
 static void ParseCommandList(const wchar_t *id,
 		CommandList *pre_command_list, CommandList *post_command_list,
-		wchar_t *whitelist[], bool register_command_lists=true)
+		const wchar_t *whitelist[], bool register_command_lists=true)
 {
 	IniSectionVector *section = NULL;
 	IniSectionVector::iterator entry;
@@ -2539,7 +2617,7 @@ static void ParseConstantsSection()
 	section->erase(section->begin() + write_index, section->end());
 }
 
-static wchar_t *true_false_overrule[] = {
+static const wchar_t *true_false_overrule[] = {
 	L"false", // GetIniBoolIntOrEnum will also accept 0/false/no/off
 	L"true", // GetIniBoolIntOrEnum will also accept 1/true/yes/on
 	L"overrule", // GetIniBoolIntOrEnum will also accept 2
@@ -2623,7 +2701,7 @@ static void warn_deprecated_shaderoverride_options(const wchar_t *id, ShaderOver
 
 // List of keys in [ShaderOverride] sections that are processed in this
 // function. Used by ParseCommandList to find any unrecognised lines.
-wchar_t *ShaderOverrideIniKeys[] = {
+const wchar_t *ShaderOverrideIniKeys[] = {
 	L"hash",
 	L"allow_duplicate_hash",
 	L"depth_filter",
@@ -2726,7 +2804,7 @@ static std::vector<std::string> split_string(const std::string *str, char sep)
 }
 
 template <typename T>
-static std::set<T> vec_to_set(std::vector<T> &v)
+static std::set<T> vec_to_set(const std::vector<T> &v)
 {
 	return std::set<T>(v.begin(), v.end());
 }
@@ -2748,7 +2826,7 @@ static uint32_t hash_ini_section(uint32_t hash, const wstring *sname)
 
 // List of keys in [ShaderRegex] sections that are processed in this
 // function. Used by ParseCommandList to find any unrecognised lines.
-wchar_t *ShaderRegexIniKeys[] = {
+const wchar_t *ShaderRegexIniKeys[] = {
 	L"shader_model",
 	L"temps",
 	L"filter_index",
@@ -3048,7 +3126,7 @@ static void ParseShaderRegexSections()
 
 // List of keys in [TextureOverride] sections that are processed in this
 // function. Used by ParseCommandList to find any unrecognised lines.
-wchar_t *TextureOverrideIniKeys[] = {
+const wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
 	L"format",
 	L"width",
@@ -3068,7 +3146,7 @@ wchar_t *TextureOverrideIniKeys[] = {
 	NULL
 };
 // List of keys for fuzzy matching that cannot be used together with hash:
-wchar_t *TextureOverrideFuzzyMatchesIniKeys[] = {
+const wchar_t *TextureOverrideFuzzyMatchesIniKeys[] = {
 	TEXTURE_OVERRIDE_FUZZY_MATCHES,
 	NULL
 };
@@ -3230,7 +3308,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 	if (G->allow_buffer_resize) 
 	{
 		// Handle buffer resize aka vertex limit raise feature.
-		int override_vertex_count = GetIniInt(id, L"override_vertex_count", -1.0f, &found);
+		int override_vertex_count = GetIniInt(id, L"override_vertex_count", -1, &found);
 		if (override_vertex_count > 0) {
 			// Ensure that stride is specified.
 			int override_byte_stride = GetIniInt(id, L"override_byte_stride", -1, NULL);
@@ -3242,7 +3320,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 			override->override_byte_width = override_byte_stride * override_vertex_count;
 
 			// Handle UAV resize
-			int uav_byte_stride = GetIniInt(id, L"uav_byte_stride", -1.0f, &found);
+			int uav_byte_stride = GetIniInt(id, L"uav_byte_stride", -1, &found);
 			if (uav_byte_stride > 0) {
 				// Use StructureByteStride override (useful when actual buffer stride is different from the one declared by a game)
 				override->override_num_elements = override_vertex_count * override_byte_stride / uav_byte_stride;
@@ -3648,7 +3726,7 @@ static void ParseTextureOverrideSections()
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476088(v=vs.85).aspx
-static wchar_t *BlendOPs[] = {
+static const wchar_t *BlendOPs[] = {
 	L"",
 	L"ADD",
 	L"SUBTRACT",
@@ -3658,7 +3736,7 @@ static wchar_t *BlendOPs[] = {
 };
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476086(v=vs.85).aspx
-static wchar_t *BlendFactors[] = {
+static const wchar_t *BlendFactors[] = {
 	L"",
 	L"ZERO",
 	L"ONE",
@@ -3845,14 +3923,14 @@ static void ParseBlendState(CustomShader *shader, const wchar_t *section)
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476113(v=vs.85).aspx
-static wchar_t *DepthWriteMasks[] = {
+static const wchar_t *DepthWriteMasks[] = {
 	L"ZERO",
 	L"ALL",
 };
 
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476101(v=vs.85).aspx
-static wchar_t *ComparisonFuncs[] = {
+static const wchar_t *ComparisonFuncs[] = {
 	L"",
 	L"NEVER",
 	L"LESS",
@@ -3865,7 +3943,7 @@ static wchar_t *ComparisonFuncs[] = {
 };
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476219(v=vs.85).aspx
-static wchar_t *StencilOps[] = {
+static const wchar_t *StencilOps[] = {
 	L"",
 	L"KEEP",
 	L"ZERO",
@@ -3999,7 +4077,7 @@ static void ParseDepthStencilState(CustomShader *shader, const wchar_t *section)
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476131(v=vs.85).aspx
-static wchar_t *FillModes[] = {
+static const wchar_t *FillModes[] = {
 	L"",
 	L"",
 	L"WIREFRAME",
@@ -4007,7 +4085,7 @@ static wchar_t *FillModes[] = {
 };
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ff476108(v=vs.85).aspx
-static wchar_t *CullModes[] = {
+static const wchar_t *CullModes[] = {
 	L"",
 	L"NONE",
 	L"FRONT",
@@ -4015,7 +4093,7 @@ static wchar_t *CullModes[] = {
 };
 
 // Actually a bool
-static wchar_t *FrontDirection[] = {
+static const wchar_t *FrontDirection[] = {
 	L"Clockwise",
 	L"CounterClockwise",
 };
@@ -4096,7 +4174,7 @@ static void ParseRSState(CustomShader *shader, const wchar_t *section)
 }
 
 struct PrimitiveTopology {
-	wchar_t *name;
+	const wchar_t *name;
 	int val;
 };
 
@@ -4147,7 +4225,7 @@ static struct PrimitiveTopology PrimitiveTopologies[] = {
 
 static void ParseTopology(CustomShader *shader, const wchar_t *section)
 {
-	wchar_t *prefix = L"D3D11_PRIMITIVE_TOPOLOGY_";
+	const wchar_t *prefix = L"D3D11_PRIMITIVE_TOPOLOGY_";
 	size_t prefix_len;
 	wchar_t val[MAX_PATH];
 	wchar_t *ptr;
@@ -4233,7 +4311,7 @@ static void ParseSamplerState(CustomShader *shader, const wchar_t *section)
 
 // List of keys in [CustomShader] sections that are processed in this
 // function. Used by ParseCommandList to find any unrecognised lines.
-wchar_t *CustomShaderIniKeys[] = {
+const wchar_t *CustomShaderIniKeys[] = {
 	L"vs", L"hs", L"ds", L"gs", L"ps", L"cs",
 	L"max_executions_per_frame", L"flags",
 	// OM Blend State overrides:
@@ -4661,7 +4739,7 @@ void LoadConfigFile()
 
 	if (GetIniStringAndLog(L"System", L"hook", 0, setting, MAX_PATH))
 	{
-		G->enable_hooks = parse_enum_option_string<wchar_t *, EnableHooks>
+		G->enable_hooks = parse_enum_option_string<const wchar_t *, EnableHooks>
 			(EnableHooksNames, setting, NULL);
 
 		if (G->enable_hooks & EnableHooks::DEPRECATED)

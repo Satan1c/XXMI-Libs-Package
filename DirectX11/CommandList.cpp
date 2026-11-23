@@ -6,8 +6,12 @@
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
+#include <bit>
+#include <charconv>
 #include <cstdio>
 #include <sstream>
+#include <string_view>
+#include <system_error>
 #include "HackerDevice.h"
 #include "HackerContext.h"
 #include "Override.h"
@@ -1179,7 +1183,7 @@ static bool ParseFrameAnalysisDump(const wchar_t *section,
 	FrameAnalysisDumpCommand *operation = new FrameAnalysisDumpCommand();
 	wchar_t *buf;
 	size_t size = val->size() + 1;
-	wchar_t *target = NULL;
+	const wchar_t *target = NULL;
 
 	// parse_enum_option_string replaces spaces with NULLs, so it can't
 	// operate on the buffer in the wstring directly. I could potentially
@@ -1188,7 +1192,7 @@ static bool ParseFrameAnalysisDump(const wchar_t *section,
 	buf = new wchar_t[size];
 	wcscpy_s(buf, size, val->c_str());
 
-	operation->analyse_options = parse_enum_option_string<wchar_t *, FrameAnalysisOptions>
+	operation->analyse_options = parse_enum_option_string<const wchar_t *, FrameAnalysisOptions>
 		(FrameAnalysisOptionNames, buf, &target);
 
 	if (!target)
@@ -1569,7 +1573,7 @@ static UINT get_index_count_from_current_ib(ID3D11DeviceContext *mOrigContext1)
 	return 0;
 }
 
-void DrawCommand::do_indirect_draw_call(CommandListState *state, char *name,
+void DrawCommand::do_indirect_draw_call(CommandListState *state, const char *name,
 		void (__stdcall ID3D11DeviceContext::*IndirectDrawCall)(THIS_
 		ID3D11Buffer *pBufferForArgs,
 		UINT AlignedByteOffsetForArgs))
@@ -1779,7 +1783,7 @@ void StoreCommand::run(CommandListState* state)
 	D3D11_BUFFER_DESC src_desc = {};
 	static_cast<ID3D11Buffer*>(src_resource)->GetDesc(&src_desc);
 
-	const UINT value_index = offset_expression->evaluate(state);
+	const UINT value_index = (UINT)offset_expression->evaluate(state);
 	const UINT value_size = sizeof(float);
 
 	// StoreCommand historically treats the source as a flat sequence of 4-byte values.
@@ -1902,7 +1906,7 @@ bool StoreCommand::ReadValueFromGPU(
 	//
 	// Its size is the complete copy region, which may contain multiple
 	// structures when the requested value crosses a structure boundary.
-	ID3D11Buffer* staging = hacker_context->GetReadbackBuffer(copy_size);
+	ID3D11Buffer* staging = hacker_context->GetReadbackBuffer(static_cast<UINT>(copy_size));
 
 	if (!staging)
 	{
@@ -1995,7 +1999,7 @@ FrameAnalysisChangeOptionsCommand::FrameAnalysisChangeOptionsCommand(wstring *va
 	buf = new wchar_t[size];
 	wcscpy_s(buf, size, val->c_str());
 
-	analyse_options = parse_enum_option_string<wchar_t *, FrameAnalysisOptions>
+	analyse_options = parse_enum_option_string<const wchar_t *, FrameAnalysisOptions>
 		(FrameAnalysisOptionNames, buf, NULL);
 
 	delete [] buf;
@@ -2466,6 +2470,7 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 	const D3D_SHADER_MACRO *macros = NULL;
 	bool found = false;
 	FILETIME timestamp;
+	wchar_t *ext;
 
 	LogInfo("  %cs=%S\n", type, filename);
 
@@ -2544,7 +2549,7 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 	// XXX: If we allow the compilation to be customised further (e.g. with
 	// addition preprocessor defines), make the cache filename unique for
 	// each possible combination
-	wchar_t *ext = wcsrchr(wpath, L'.');
+	ext = wcsrchr(wpath, L'.');
 	if (ext > wcsrchr(wpath, L'\\'))
 		swprintf_s(cache_path, MAX_PATH, L"%.*s.%S.%x.bin", (int)(ext - wpath), wpath, shaderModel, (UINT)compile_flags);
 	else
@@ -3177,7 +3182,7 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 			return texture_filter_target.GetResourceHammingDistance(state);
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS:
-			return texture_filter_target.GetResourceBindFlags(state);
+			return (float)texture_filter_target.GetResourceBindFlags(state);
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SIZE:
 			return texture_filter_target.GetResourceSize(state);
@@ -4142,7 +4147,7 @@ static inline bool is_operator_char(wchar_t c)
 	}
 }
 
-static size_t FindIdentifierTokenEnd(const std::wstring& str, const size_t start = 0, OptionalChars identifier_flags = OptionalChars::NONE)
+static size_t FindIdentifierTokenEnd(std::wstring_view str, const size_t start = 0, OptionalChars identifier_flags = OptionalChars::NONE)
 {
 	for (size_t i = start; i < str.size(); ++i)
 	{
@@ -4167,7 +4172,7 @@ enum class NamespaceState : uint8_t
 class NamespaceScanner
 {
 public:
-	bool Consume(wchar_t c, const std::wstring& str, size_t pos)
+	bool Consume(wchar_t c, std::wstring_view str, size_t pos)
     {
 		switch (state_)
 		{
@@ -4218,7 +4223,7 @@ public:
 	}
 
 private:
-	static bool IsFinalSegmentCandidate(const std::wstring& str, size_t start)
+	static bool IsFinalSegmentCandidate(std::wstring_view str, size_t start)
 	{
 		if (start >= str.size())
 			return false;
@@ -4242,7 +4247,7 @@ private:
 	NamespaceState state_ = NamespaceState::Waiting;
 };
 
-static size_t FindVariableTokenEnd(const std::wstring& str, size_t start = 0)
+static size_t FindVariableTokenEnd(std::wstring_view str, size_t start = 0)
 {
 	// Scans a variable token and returns the end position after performing minimal syntax validation:
 	// 1. Ensures identifier characters match `[a-z_0-9]+`.
@@ -4265,7 +4270,7 @@ static size_t FindVariableTokenEnd(const std::wstring& str, size_t start = 0)
 	return str.size();
 }
 
-static size_t FindResourceCopyTargetTokenEnd(const std::wstring& str, size_t start = 0)
+static size_t FindResourceCopyTargetTokenEnd(std::wstring_view str, size_t start = 0)
 {
 	// Scans a resource copy target token and returns the end position after performing minimal syntax validation:
 	// 1. Ensures identifier characters match `[a-z_-.0-9]+`.
@@ -4350,7 +4355,34 @@ static size_t FindResourceCopyTargetTokenEnd(const std::wstring& str, size_t sta
 	return end;
 }
 
-inline bool ParseFloatToken(const wstring& input, float& out, size_t& length)
+// Parses a float literal at the start of `input` and reports the number of
+// characters consumed in `length`. Trailing text is not an error: callers
+// that need the whole input consumed compare `length` to input.size().
+//
+// Uses std::from_chars instead of wcstof so parsing is locale-independent
+// (wcstof honours LC_NUMERIC, so a game calling setlocale() on a
+// decimal-comma system would read "0.5" as 0) and bounded by the view
+// rather than by a null terminator.
+//
+// Accepted forms, in the order they are tried:
+//   binary   0b1010                   ParseBinaryLiterals, no sign
+//   hex      0x1A, 0x1.8p3, -0x10     from_chars(chars_format::hex)
+//   decimal  1, 1.5, .5, 1e-3,        from_chars(chars_format::general)
+//            inf, infinity, nan, nan(ind), with optional leading sign
+// Not accepted: leading whitespace (callers strip it), "+-5".
+//
+// Behaviour kept from the wcstof implementation:
+//   - a leading '+' is accepted (from_chars alone rejects it);
+//   - "0x" not followed by hex digits parses as 0 with length 1;
+//   - overflow becomes ±infinity.
+// Changed: underflow (1e-50) becomes ±0. The wcstof version turned it into
+// ±infinity as well because it only checked for ERANGE; from_chars also
+// lumps both together, so FloatLiteralUnderflows tells them apart.
+//
+// To change what is accepted, adjust the `literal_char` set (which only
+// bounds the candidate) and the from_chars calls (which decide the actual
+// end of the literal).
+inline bool ParseFloatToken(std::wstring_view input, float& out, size_t& length)
 {
 	// Binary literal.
 	if (input.size() >= 3 && input[0] == L'0' && input[1] == L'b')
@@ -4364,23 +4396,65 @@ inline bool ParseFloatToken(const wstring& input, float& out, size_t& length)
 		return true;
 	}
 
-	wchar_t* end = nullptr;
-
-	errno = 0;
-	out = std::wcstof(input.c_str(), &end);
-
-	if (end == input.c_str())
-		return false;
-
-	length = static_cast<std::size_t>(end - input.c_str());
-
-	if (errno == ERANGE)
+	// from_chars only takes narrow characters. Copy the longest prefix made
+	// of characters that can appear in a float literal; anything else (or
+	// any non-ASCII character) ends the candidate.
+	std::string narrow;
+	for (wchar_t c : input)
 	{
-		out = std::signbit(out)
-			? -std::numeric_limits<float>::infinity()
-			: std::numeric_limits<float>::infinity();
+		bool literal_char = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z')
+			|| c == L'.' || c == L'+' || c == L'-' || c == L'(' || c == L')' || c == L'_';
+		if (!literal_char)
+			break;
+		narrow.push_back(static_cast<char>(c));
 	}
 
+	const char* first = narrow.data();
+	const char* last = first + narrow.size();
+
+	// Skip an explicit '+' unless it is followed by another sign, which
+	// wcstof also rejected.
+	if (last - first >= 2 && first[0] == '+' && first[1] != '+' && first[1] != '-')
+		++first;
+
+	bool negative = first != last && *first == '-';
+	const char* digits = negative ? first + 1 : first;
+
+	std::from_chars_result result{ first, std::errc::invalid_argument };
+	const char* literal = first;
+	std::chars_format format = std::chars_format::general;
+
+	// Hex: from_chars parses hex only without the "0x" prefix and without a
+	// sign, so both are handled here. If no hex digits follow the prefix
+	// this falls through to the decimal parse, which consumes the "0".
+	if (last - digits >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+	{
+		literal = digits + 2;
+		format = std::chars_format::hex;
+		result = std::from_chars(literal, last, out, format);
+		if (result.ec == std::errc() && negative)
+			out = -out;
+	}
+
+	if (result.ec == std::errc::invalid_argument)
+	{
+		literal = first;
+		format = std::chars_format::general;
+		result = std::from_chars(literal, last, out, format);
+	}
+
+	if (result.ec == std::errc::invalid_argument)
+		return false;
+
+	if (result.ec == std::errc::result_out_of_range)
+	{
+		// from_chars left `out` untouched: overflow -> ±inf, underflow -> ±0.
+		float magnitude = FloatLiteralUnderflows(literal, result.ptr, format) ? 0.0f : std::numeric_limits<float>::infinity();
+		out = negative ? -magnitude : magnitude;
+	}
+
+	// `narrow` is a prefix copy of `input`, so offsets map 1:1.
+	length = static_cast<size_t>(result.ptr - narrow.data());
 	return true;
 }
 
@@ -4900,7 +4974,7 @@ end:
 #pragma endregion CommandArgumentReader
 
 
-static const wchar_t *function_tokens[] = {
+static constexpr std::wstring_view function_tokens[] = {
 	L"countbits",
 
 	L"sin",
@@ -4931,7 +5005,7 @@ static const wchar_t *function_tokens[] = {
 	L"random"
 };
 
-static const wchar_t *operator_tokens[] = {
+static constexpr std::wstring_view operator_tokens[] = {
 	// Three character tokens first:
 	L"===", L"!==",
 	// Two character tokens next:
@@ -5017,24 +5091,204 @@ static uint32_t GetOperatorMask(const wchar_t* token, size_t length)
 	return 0;
 }
 
+// Returns the operator token at the start of `remain`, or an empty view when there is none.
+// The result aliases operator_tokens, so its data() remains null terminated.
+static std::wstring_view lex_operator(std::wstring_view remain)
+{
+	for (std::wstring_view op : operator_tokens)
+	{
+		if (remain.starts_with(op))
+			return op;
+	}
+
+	return {};
+}
+
+// Same for function names,
+// which are only operators when applied to a parenthesised argument.
+static std::wstring_view lex_function(std::wstring_view remain)
+{
+	for (std::wstring_view fn : function_tokens)
+	{
+		if (remain.size() > fn.size() && remain.starts_with(fn) && remain[fn.size()] == L'(')
+			return fn;
+	}
+
+	return {};
+}
+
+// Lexes and constructs the operand at the start of `remain`, which must not begin with whitespace.
+// Returns the number of characters consumed, and throws CommandListSyntaxError when nothing matches.
+//
+// Where a token ends cannot be decided before knowing what it is:
+// `vb0->stride` ends the identifier at the arrow,
+// while a target may itself contain hyphens, brackets and namespace separators.
+// The boundary search therefore stays paired with the parse_* chain,
+// instead of running as a separate lexing pass.
+static size_t lex_operand(std::wstring_view remain, CommandListOperand* operand, const wstring* ini_namespace, CommandListScope* scope)
+{
+	// Carries the candidate into each parse_* attempt,
+	// and is left holding the token that matched for the syntax tree dump.
+	wstring& token = operand->token;
+
+	// Numeric Literal
+	if (std::isdigit(remain[0]) || remain[0] == L'.')
+	{
+		// - Supported inputs: DECIMAL 0.0001, HEX 0x0001, BIN 0b0001.
+		// - Must tokenise subtraction operation first.
+		// - Static optimisation will merge unary negation.
+		// - Special literals (inf, nan, etc) are being parsed last.
+		size_t float_len = remain.size();
+
+		if (operand->parse_float(remain, ini_namespace, scope, float_len))
+		{
+			token.assign(remain.substr(0, float_len));
+			LogDebug("      Float: \"%S\"\n", token.c_str());
+			return float_len;
+		}
+
+		throw CommandListSyntaxError(L"Float not recognized: " + wstring(remain), operand->token_pos);
+	}
+
+	// Variable
+	if (remain[0] == L'$')
+	{
+		bool is_pool_variable_candidate = remain.size() >= 6 && remain.starts_with(L"$pool");
+
+		if (is_pool_variable_candidate)
+		{
+			// More loose pool variable identifier match with hyphens, brackets and UTF-8.
+			// Allows strings like `$Pool\path like\namespace\chars_UTF-8[$index]`.
+			size_t pool_len = FindResourceCopyTargetTokenEnd(remain, 1);
+
+			if (pool_len)
+			{
+				token.assign(remain.substr(0, pool_len));
+
+				// Parse pool variable.
+				if (operand->parse_target(&token, ini_namespace, scope))
+				{
+					LogDebugW(L"      ResourceCopyTarget: \"%ls\"\n", token.c_str());
+					return pool_len;
+				}
+			}
+		}
+
+		size_t var_len = FindVariableTokenEnd(remain, 1);
+
+		if (var_len)
+		{
+			token.assign(remain.substr(0, var_len));
+
+			if (operand->parse_variable(&token, ini_namespace, scope))
+			{
+				LogDebug("      Variable: \"%S\"\n", token.c_str());
+				return var_len;
+			}
+		}
+
+		throw CommandListSyntaxError(L"Variable not recognized: " + wstring(remain), operand->token_pos);
+	}
+
+	bool has_prefix = remain[0] == L'@' || remain[0] == L'#';
+
+	// Other Tokens
+	if (!has_prefix)
+	{
+		size_t len = FindIdentifierTokenEnd(remain, 0, OptionalChars::NONE);
+
+		// Do not match identifiers followed by `->` (e.g. `vb0->stride`).
+		if (len && len + 1 < remain.size() && remain[len] == '-' && remain[len + 1] == '>')
+			len = 0;
+
+		if (len)
+		{
+			token.assign(remain.substr(0, len));
+
+			// Parse target without hyphen (e.g. `ib`, `vb0`).
+			if (operand->parse_slot(&token, ini_namespace, scope))
+			{
+				LogDebug("      ResourceCopyTarget: \"%S\"\n", token.c_str());
+				return len;
+			}
+
+			// Parse ini params (e.g. `x`, `y0`, `z128`).
+			if (operand->parse_ini_param(&token, ini_namespace, scope))
+			{
+				LogDebug("      IniParam: \"%S\"\n", token.c_str());
+				return len;
+			}
+
+			// Parse INI "ParamOverride" value getters (e.g. `TIME`, `INDEX_COUNT`).
+			if (operand->parse_ini_keywords(&token, ini_namespace, scope))
+			{
+				LogDebug("      IniKeyword: \"%S\"\n", token.c_str());
+				return len;
+			}
+
+			// Parse special float (e.g. `inf`, `NaN`). Hyphen before `inf` is handled by operator.
+			if (operand->parse_float(remain, ini_namespace, scope, len))
+			{
+				token.assign(remain.substr(0, len));
+				LogDebug("      Float: \"%S\"\n", token.c_str());
+				return len;
+			}
+
+			// Parse scissor (e.g. `scissor0_top`).
+			if (operand->parse_scissor(&token, ini_namespace, scope))
+			{
+				LogDebug("      Scissor: \"%S\"\n", token.c_str());
+				return len;
+			}
+		}
+	}
+
+	// More loose match with hyphens, brackets and UTF-8.
+	// Allows strings like `Pool\path like\namespace\chars_UTF-8[$index]->Call($PoolFoo[$index], 1)`.
+	size_t len_target = FindResourceCopyTargetTokenEnd(remain, has_prefix ? 1 : 0);
+	if (len_target)
+	{
+		token.assign(remain.substr(0, len_target));
+
+		// Parse custom resource, pool or other target (e.g. `ResourceFoo`, `PoolFoo`, `cs-cb0`, `ib`).
+		if (operand->parse_target(&token, ini_namespace, scope))
+		{
+			LogDebugW(L"      ResourceCopyTarget: \"%ls\"\n", token.c_str());
+			return len_target;
+		}
+
+		// Parse Filter section value getters (e.g. `FilterA`).
+		if (operand->parse_resource_filter(&token, ini_namespace, scope))
+		{
+			LogDebug("      Filter: \"%S\"\n", token.c_str());
+			return len_target;
+		}
+
+		// Must be attempted after target, otherwise it'll win over slots (e.g. `vs` over `vs-cb0`).
+		if (!has_prefix)
+		{
+			// Parse shader (e.g. `vs`, `cs`).
+			if (operand->parse_shader(&token, ini_namespace, scope))
+			{
+				LogDebug("      Shader: \"%S\"\n", token.c_str());
+				return len_target;
+			}
+		}
+	}
+
+	// Operand parsing failed.
+	throw CommandListSyntaxError(L"Unrecognised identifier: " + token, operand->token_pos);
+}
+
 static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, const wstring* ini_namespace, CommandListScope* scope, uint32_t* operator_mask)
 {
 	const wstring& expr = *expression;
 
-	ResourceCopyTarget texture_filter_target;
-	shared_ptr<CommandListOperand> operand;
-	wstring token;
-	wstring remain;
 	size_t pos = 0;
-	size_t friendly_pos = 0;
-	int i;
 	bool last_was_operand = false;
 
 	LogDebug("    Tokenising \"%S\"\n", expr.c_str());
 
-	// TODO: C++20 refactor.
-	// This rewrite stays close to the old (mostly missing) architecture to simplify transition.
-	// Proper refactor should implement Lexer and CommandParser classes and use `std::wstring_view` once it's available.
 	while (true)
 	{
 		// Skip whitespace:
@@ -5042,224 +5296,40 @@ static void tokenise(const wstring* expression, CommandListSyntaxTree* tree, con
 		if (pos == wstring::npos)
 			return;
 
-		friendly_pos = pos;
-
-		remain = expr.substr(pos);
-
-		bool matched = false;
+		size_t friendly_pos = pos;
+		std::wstring_view remain = std::wstring_view(expr).substr(pos);
 
 		// Operators:
-		for (i = 0; i < ARRAYSIZE(operator_tokens); i++)
+		if (std::wstring_view op = lex_operator(remain); !op.empty())
 		{
-			size_t len = wcslen(operator_tokens[i]);
+			*operator_mask |= GetOperatorMask(op.data(), op.size());
 
-			if (remain.compare(0, len, operator_tokens[i]) == 0)
-			{
-				*operator_mask |= GetOperatorMask(operator_tokens[i], len);
+			LogDebug("      Operator: \"%S\"\n", op.data());
 
-				LogDebug("      Operator: \"%S\"\n", remain.substr(0, len).c_str());
+			tree->tokens.emplace_back(make_shared<CommandListOperatorToken>(friendly_pos, wstring(op)));
 
-				tree->tokens.emplace_back(make_shared<CommandListOperatorToken>(friendly_pos, remain.substr(0, len)));
-
-				pos += len;
-				last_was_operand = false;
-				matched = true;
-				break;
-			}
-		}
-
-		if (matched)
+			pos += op.size();
+			last_was_operand = false;
 			continue;
+		}
 
 		// Functions:
-		for (i = 0; i < ARRAYSIZE(function_tokens); i++)
+		if (std::wstring_view fn = lex_function(remain); !fn.empty())
 		{
-			size_t len = wcslen(function_tokens[i]);
+			*operator_mask |= OP_UNARY;
 
-			if (remain.size() > len && remain.compare(0, len, function_tokens[i]) == 0 && remain[len] == L'(')
-			{
-				*operator_mask |= OP_UNARY;
+			LogDebug("      Function: \"%S\"\n", fn.data());
 
-				LogDebug("      Function: \"%S\"\n", function_tokens[i]);
-				
-				tree->tokens.emplace_back(make_shared<CommandListOperatorToken>(friendly_pos, remain.substr(0, len)));
+			tree->tokens.emplace_back(make_shared<CommandListOperatorToken>(friendly_pos, wstring(fn)));
 
-				pos += len;
-				last_was_operand = false;
-				matched = true;
-				break;
-			}
-		}
-
-		if (matched)
+			pos += fn.size();
+			last_was_operand = false;
 			continue;
-
-		operand = make_shared<CommandListOperand>(friendly_pos, token);
-
-		// Numeric Literal
-		if (std::isdigit(remain[0]) || remain[0] == L'.')
-		{
-			// - Supported inputs: DECIMAL 0.0001, HEX 0x0001, BIN 0b0001.
-			// - Must tokenise subtraction operation first.
-			// - Static optimisation will merge unary negation.
-			// - Special literals (inf, nan, etc) are being parsed last.
-			size_t len = remain.size();
-
-			if (operand->parse_float(&remain, ini_namespace, scope, len))
-			{
-				token = remain.substr(0, len);
-				LogDebug("      Float: \"%S\"\n", token.c_str());
-				pos += len;
-				goto import_operand;
-			}
-
-			throw CommandListSyntaxError(L"Float not recognized: " + remain, friendly_pos);
 		}
 
-		bool has_variable_prefix = remain[0] == L'$';
+		auto operand = make_shared<CommandListOperand>(friendly_pos);
 
-		// Variable
-		if (has_variable_prefix)
-		{
-			bool is_pool_variable_candidate = remain.size() >= 6 && wcsncmp(remain.c_str(), L"$pool", 5) == 0;
-
-			if (is_pool_variable_candidate)
-			{
-				// More loose pool variable identifier match with hyphens, brackets and UTF-8.
-				// Allows strings like `$Pool\path like\namespace\chars_UTF-8[$index]`.
-				size_t len_target = FindResourceCopyTargetTokenEnd(remain, 1);
-
-				if (len_target)
-				{
-					token = remain.substr(0, len_target);
-
-					// Parse pool variable.
-					if (operand->parse_target(&token, ini_namespace, scope))
-					{
-						LogDebugW(L"      ResourceCopyTarget: \"%ls\"\n", token.c_str());
-						pos += len_target;
-						goto import_operand;
-					}
-				}
-			}
-
-			size_t len = FindVariableTokenEnd(remain, 1);
-
-			if (len)
-			{
-				token = remain.substr(0, len);
-
-				if (operand->parse_variable( &token, ini_namespace, scope))
-				{
-					LogDebug("      Variable: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-			}
-
-			throw CommandListSyntaxError(L"Variable not recognized: " + remain, friendly_pos);
-		}
-
-		bool has_prefix = has_variable_prefix || remain[0] == L'@' || remain[0] == L'#';
-
-		size_t len = 0;
-
-		// Other Tokens
-		if (!has_prefix)
-		{
-			len = FindIdentifierTokenEnd(remain, 0, OptionalChars::NONE);
-			
-			// Do not match identifiers followed by `->` (e.g. `vb0->stride`).
-			if (len && len + 1 < remain.size() && remain[len] == '-' && remain[len + 1] == '>')
-				len = 0;
-
-			if (len)
-			{
-				token = remain.substr(0, len);
-
-				// Parse target without hyphen (e.g. `ib`, `vb0`).
-				if (operand->parse_slot(&token, ini_namespace, scope))
-				{
-					LogDebug("      ResourceCopyTarget: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-
-				// Parse ini params (e.g. `x`, `y0`, `z128`).
-				if (operand->parse_ini_param(&token, ini_namespace, scope))
-				{
-					LogDebug("      IniParam: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-
-				// Parse INI "ParamOverride" value getters (e.g. `TIME`, `INDEX_COUNT`).
-				if (operand->parse_ini_keywords(&token, ini_namespace, scope))
-				{
-					LogDebug("      IniKeyword: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-
-				// Parse special float (e.g. `inf`, `NaN`). Hyphen before `inf` is handled by operator.
-				if (operand->parse_float(&remain, ini_namespace, scope, len))
-				{
-					token = remain.substr(0, len);
-					LogDebug("      Float: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-
-				// Parse scissor (e.g. `scissor0_top`).
-				if (operand->parse_scissor(&token, ini_namespace, scope))
-				{
-					LogDebug("      Scissor: \"%S\"\n", token.c_str());
-					pos += len;
-					goto import_operand;
-				}
-			}
-		}
-		
-		// More loose match with hyphens, brackets and UTF-8.
-		// Allows strings like `Pool\path like\namespace\chars_UTF-8[$index]->Call($PoolFoo[$index], 1)`.
-		size_t len_target = FindResourceCopyTargetTokenEnd(remain, has_prefix ? 1 : 0);
-		if (len_target)
-		{
-			token = remain.substr(0, len_target);
-
-			// Parse custom resource, pool or other target (e.g. `ResourceFoo`, `PoolFoo`, `cs-cb0`, `ib`).
-			if (operand->parse_target(&token, ini_namespace, scope))
-			{
-				LogDebugW(L"      ResourceCopyTarget: \"%ls\"\n", token.c_str());
-				pos += len_target;
-				goto import_operand;
-			}
-
-			// Parse Filter section value getters (e.g. `FilterA`).
-			if (operand->parse_resource_filter(&token, ini_namespace, scope))
-			{
-				LogDebug("      Filter: \"%S\"\n", token.c_str());
-				pos += len_target;
-				goto import_operand;
-			}
-
-			// Must be attempted after target, otherwise it'll win over slots (e.g. `vs` over `vs-cb0`).
-			if (!has_prefix)
-			{
-				// Parse shader (e.g. `vs`, `cs`).
-				if (operand->parse_shader(&token, ini_namespace, scope))
-				{
-					LogDebug("      Shader: \"%S\"\n", token.c_str());
-					pos += len_target;
-					goto import_operand;
-				}
-			}
-		}
-
-		// Operand parsing failed.
-		throw CommandListSyntaxError(L"Unrecognised identifier: " + token, friendly_pos);
-
-import_operand:
+		pos += lex_operand(remain, operand.get(), ini_namespace, scope);
 
 		tree->tokens.emplace_back(std::move(operand));
 
@@ -5334,7 +5404,7 @@ public: \
 		) : CommandListOperator(lhs, t, rhs) \
 	{} \
 	static const wchar_t* pattern() { return L##operator_pattern; } \
-	float evaluate(float lhs, float rhs) override { return (fn); } \
+	float evaluate(float lhs, float rhs) override { return (float)(fn); } \
 }; \
 static CommandListOperatorFactory<name##T> name;
 
@@ -6090,9 +6160,9 @@ bool parse_command_list_var_name(const wstring &name, const wstring *ini_namespa
 	return true;
 }
 
-bool CommandListOperand::parse_float(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length)
+bool CommandListOperand::parse_float(std::wstring_view operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length)
 {
-	if (ParseFloatToken(*operand, val, out_length))
+	if (ParseFloatToken(operand, val, out_length))
 	{
 		type = ParamOverrideType::VALUE;
 		return operand_allowed_in_context(type, scope);
@@ -6993,7 +7063,8 @@ out_close:
 
 bool CustomResource::HasPNGsRGBChunk(wstring filename)
 {
-	FILE *f = _wfopen(filename.c_str(), L"rb");
+	FILE *f = nullptr;
+	_wfopen_s(&f, filename.c_str(), L"rb");
 	if (f != nullptr) {
 		unsigned char signature[8];
 		fread(signature, 1, 8, f);
@@ -7869,7 +7940,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 		//	 ResourcePoolFoo[33] -> ResourcePoolFoo_0 (pool_index 0, evicts UID 11)
 		//   ResourcePoolFoo[22] -> ResourcePoolFoo_1 (pool_index 1, existing assignment)
 		//   ResourcePoolFoo[44] -> ResourcePoolFoo_1 (pool_index 1, evicts UID 22)
-		uint32_t key = BitCastToUint(id);
+		uint32_t key = std::bit_cast<uint32_t>(id);
 
 		if (index_map->find(key, pool_index))
 		{
@@ -7904,7 +7975,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 		// The input ID is a spatial hash (uint32_t) bitcast to float.
 		// The hash encodes quantized XYZ cell coordinates and preserves spatial locality.
 		// Objects mapped to the same spatial cell share the same pool slot.
-		uint32_t spatial_hash = BitCastToUint(id);
+		uint32_t spatial_hash = std::bit_cast<uint32_t>(id);
 
 		if (index_map->find(spatial_hash, pool_index))
 		{
@@ -8010,6 +8081,7 @@ size_t CustomResourcePool::GetElementIndex(float id, bool use_ring_index, bool i
 
 	default:
 		assert(false);
+		return SIZE_MAX;
 	}
 }
 
@@ -8195,7 +8267,7 @@ void CustomResourcePool::InitializeResource(size_t pool_index)
 
 		element.resource->name = resource_id;
 		element.resource->pool = this;
-		element.resource->pool_index = pool_index;
+		element.resource->pool_index = (int)pool_index;
 	}
 
 	element.resource->CopyMetadataFrom(*resource_template);
@@ -8872,10 +8944,11 @@ IniParserResult ResourceCopyTarget::ParseTargetPool(const wchar_t*& target, size
 	// Handle resource pool index
 	if (custom_resource_pool->index_type == PoolIndexType::STATIC)
 	{
-		// Parse value for STATIC index type.
-		wchar_t* end;
-		float static_pool_index = wcstof(pool_index_text.c_str(), &end);
-		if (*end != L'\0')
+		// Parse value for STATIC index type. The whole text must be a
+		// single float literal (same grammar as the expression parser).
+		float static_pool_index;
+		size_t len;
+		if (!ParseFloatToken(pool_index_text, static_pool_index, len) || len != pool_index_text.size())
 			return IniParserResult::SYNTAX_ERROR;
 
 		// Statically resolve custom resource or variable from pool.
@@ -9031,7 +9104,7 @@ IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& targ
 		ResourceCopyTargetType type;
 		bool source_only;
 		bool parse_shader = false;
-		int max_slot_count = 0;
+		unsigned max_slot_count = 0;
 	};
 
 	static constexpr TargetInfo targets[] = {
@@ -9938,11 +10011,12 @@ static CommandListCommand* parse_layout_operation(
 	{
 		//LogInfo("Parsed LAYOUT_ELEMENT_OFFSET: ");
 
-		wchar_t* end = nullptr;
-		operation->override.replace.aligned_byte_offset = (UINT)wcstof(val->c_str(), &end);
-
-		if (*end != L'\0')
+		float offset;
+		size_t len;
+		if (!ParseFloatToken(*val, offset, len) || len != val->size())
 			goto bail;
+
+		operation->override.replace.aligned_byte_offset = (UINT)offset;
 
 		break;
 	}
@@ -9986,7 +10060,7 @@ void LayoutElementOperation::run(CommandListState* state)
 {
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
-	override.match.semantic_index = dst.member_args[1].GetValue(state);
+	override.match.semantic_index = (UINT)dst.member_args[1].GetValue(state);
 
 	if (state->input_layout_overrides.empty())
 		state->input_layout_overrides.reserve(16);
@@ -10031,11 +10105,11 @@ CommandListCommand* parse_pool_variable_operation(
 			if (ParseFloatToken(*val, value, len))
 				RegisterUnknownSetting(key, value);
 		}
-		return false;
+		return nullptr;
 	}
 
 	if (val->empty())
-		return false;
+		return nullptr;
 
 	PoolVariableOperation* command = new PoolVariableOperation();
 
@@ -11797,6 +11871,9 @@ float ResourceCopyTarget::GetResourceHammingDistance(CommandListState* state)
 {
 	float ret = ResourcePropertyResult::UNKNOWN;
 
+	uint64_t resource_dhash = 0;
+	bool has_resource_dhash = false;
+
 	ID3D11View* view = nullptr;
 	ID3D11Resource* resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
 
@@ -11806,8 +11883,7 @@ float ResourceCopyTarget::GetResourceHammingDistance(CommandListState* state)
 		goto cleanup;
 	}
 
-	uint64_t resource_dhash = 0;
-	bool has_resource_dhash = GetDhash(state->mHackerContext, resource, G->dhash_mip_size, G->dhash_allow_rehash, resource_dhash, view);
+	has_resource_dhash = GetDhash(state->mHackerContext, resource, G->dhash_mip_size, G->dhash_allow_rehash, resource_dhash, view);
 
 	if (has_resource_dhash)
 	{
@@ -12097,7 +12173,7 @@ float ResourceCopyTarget::GetResourceSpatialHash(CommandListState* state)
 			uint32_t spatial_hash = GetSpatialHash(state->mHackerContext, buf, offset_x, offset_y, offset_z, cell_size, GetCustomResource(state));
 
 			if (spatial_hash)
-				ret = BitCastToFloat(spatial_hash);
+				ret = std::bit_cast<float>(spatial_hash);
 
 			//LogOverlay(LOG_INFO, "GetResourceSpatialHash hash=%08lx x=%.3f y=%.3f z=%.3f\n", spatial_hash, member_args[0].GetValue(), member_args[1].GetValue(), member_args[2].GetValue());
 		}

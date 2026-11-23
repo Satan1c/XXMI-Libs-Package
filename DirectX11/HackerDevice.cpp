@@ -17,7 +17,6 @@
 #include "FrameAnalysis.h"
 
 #include <D3Dcompiler.h>
-#include <codecvt>
 
 #include "log.h"
 #include "util.h"
@@ -331,7 +330,7 @@ void HackerDevice::CreatePinkHuntingResources()
 	// Only create special pink mode PixelShader when requested.
 	if (G->hunting && (G->marking_mode == MarkingMode::PINK || G->config_reloadable))
 	{
-		char* hlsl =
+		const char* hlsl =
 			"float4 pshader() : SV_Target0"
 			"{"
 			"	return float4(1,0,1,1);"
@@ -752,8 +751,7 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// Any HLSL compiled shaders are reloading candidates, if moved to ShaderFixes
 			pShaderModel = shaderModel;
 			pTimeStamp = ftWrite;
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-			pHeaderLine = utf8_to_utf16.from_bytes(srcData, strchr(srcData, '\n'));
+			pHeaderLine = utf8_to_wstring(srcData, strchr(srcData, '\n'));
 
 			// Way too many obscure interractions in this function, using another
 			// temporary variable to not modify anything already here and reduce
@@ -882,8 +880,7 @@ static bool ReplaceASMShader(__in UINT64 hash, const wchar_t *pShaderType, const
 			// Any ASM shaders are reloading candidates, if moved to ShaderFixes
 			pShaderModel = shaderModel;
 			pTimeStamp = ftWrite;
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-			pHeaderLine = utf8_to_utf16.from_bytes(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
+			pHeaderLine = utf8_to_wstring(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
 
 			vector<byte_t> byteCode(pBytecodeLength);
 			memcpy(byteCode.data(), pShaderBytecode, pBytecodeLength);
@@ -1228,7 +1225,7 @@ template <class ID3D11Shader,
 HRESULT HackerDevice::ReplaceShaderFromShaderFixes(UINT64 hash,
 		const void *pShaderBytecode, SIZE_T BytecodeLength,
 		ID3D11ClassLinkage *pClassLinkage, ID3D11Shader **ppShader,
-		wchar_t *shaderType)
+		const wchar_t *shaderType)
 {
 	ShaderOverrideMap::iterator override;
 	const char *overrideShaderModel = NULL;
@@ -1311,7 +1308,7 @@ template <class ID3D11Shader,
 HRESULT HackerDevice::ProcessShaderNotFoundInShaderFixes(UINT64 hash,
 		const void *pShaderBytecode, SIZE_T BytecodeLength,
 		ID3D11ClassLinkage *pClassLinkage, ID3D11Shader **ppShader,
-		wchar_t *shaderType)
+		const wchar_t *shaderType)
 {
 	HRESULT hr;
 
@@ -1441,7 +1438,7 @@ template <class ID3D11Shader,
 			 __in_opt ID3D11ClassLinkage *pClassLinkage,
 			 __out_opt ID3D11Shader **ppShader)
 	 >
-void HackerDevice::KeepOriginalShader(UINT64 hash, wchar_t *shaderType,
+void HackerDevice::KeepOriginalShader(UINT64 hash, const wchar_t *shaderType,
 		ID3D11Shader *pShader,
 		const void *pShaderBytecode,
 		SIZE_T BytecodeLength,
@@ -1640,7 +1637,7 @@ STDMETHODIMP HackerDevice::CreateUnorderedAccessView(THIS_
 				}
 			}
 
-			if (override_num_elements != -1 && pDesc->Buffer.NumElements < override_num_elements) {
+			if (override_num_elements != -1 && pDesc->Buffer.NumElements < (UINT)override_num_elements) {
 				D3D11_UNORDERED_ACCESS_VIEW_DESC pNewDesc = *pDesc;
 				pNewDesc.Buffer.NumElements = override_num_elements;
 				//LogOverlayW(LOG_INFO, L"UAV resized: %d->%d\n", pDesc->Buffer.NumElements, override_num_elements);
@@ -2079,7 +2076,7 @@ static void override_resource_desc_common_2d_3d(DescType *desc, TextureOverride 
 
 static void override_resource_desc(D3D11_BUFFER_DESC *desc, TextureOverride *textureOverride) {
 	if (textureOverride->override_byte_width != -1) {
-		if (desc->ByteWidth < textureOverride->override_byte_width) {
+		if (desc->ByteWidth < (UINT)textureOverride->override_byte_width) {
 			LogInfo("  resizing buffer: %d->%d\n", desc->ByteWidth, textureOverride->override_byte_width);
 			//LogOverlayW(LOG_WARNING, L"Buffer resized: %d->%d\n - [%s]\n", desc->ByteWidth, textureOverride->override_byte_width, textureOverride->ini_section.c_str());
 			desc->ByteWidth = textureOverride->override_byte_width;
@@ -2491,7 +2488,7 @@ STDMETHODIMP HackerDevice::CreateShaderResourceView(THIS_
 // otherwise identical shaders. However I don't think there is much advantage
 // of that over just hashing the full shader, and in some cases we might like
 // to ignore variable name changes, so it seems best to skip it.
-static char* hash_whitelisted_sections[] = {
+static const char* hash_whitelisted_sections[] = {
 	"SHDR", "SHEX",         // Bytecode
 	"ISGN",         "ISG1", // Input signature
 	"PCSG",         "PSG1", // Patch constant signature
@@ -2619,7 +2616,7 @@ STDMETHODIMP HackerDevice::CreateShader(THIS_
 	__in_opt  ID3D11ClassLinkage *pClassLinkage,
 	/* [annotation] */
 	__out_opt  ID3D11Shader **ppShader,
-	wchar_t *shaderType)
+	const wchar_t *shaderType)
 {
 	HRESULT hr;
 	UINT64 hash;

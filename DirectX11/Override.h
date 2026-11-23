@@ -127,6 +127,7 @@ class KeyOverrideBase : public virtual OverrideBase, public InputListener
 {
 };
 
+#pragma warning(suppress : 4250) // Suppress ParseIniSection inheritance via dominance warning
 class KeyOverride : public KeyOverrideBase, public Override
 {
 private:
@@ -241,7 +242,7 @@ public:
 			OverrideParams *targets, OverrideVars *vars,
 			int time, TransitionType transition_type);
 	void UpdatePresets(HackerDevice *wrapper);
-	void OverrideTransition::UpdateTransitions(HackerDevice *wrapper);
+	void UpdateTransitions(HackerDevice *wrapper);
 	void Stop();
 };
 

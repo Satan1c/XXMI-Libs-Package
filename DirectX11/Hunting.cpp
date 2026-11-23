@@ -3,7 +3,6 @@
 #include <string>
 #include <sstream>
 #include <D3Dcompiler.h>
-#include <codecvt>
 
 #include "ScreenGrab.h"
 #include "wincodec.h"
@@ -29,7 +28,7 @@ DWORD castStrLen(const char* string)
 	return (DWORD)strlen(string);
 }
 
-static void DumpUsageResourceInfo(HANDLE f, std::set<uint32_t> *hashes, char *tag)
+static void DumpUsageResourceInfo(HANDLE f, std::set<uint32_t> *hashes, const char *tag)
 {
 	std::set<uint32_t>::iterator orig_hash;
 	std::set<uint32_t>::iterator iCopy;
@@ -148,7 +147,7 @@ static void DumpUsageResourceInfo(HANDLE f, std::set<uint32_t> *hashes, char *ta
 	}
 }
 
-static void DumpUsageRegister(HANDLE f, char *tag, int id, const ResourceSnapshot &info)
+static void DumpUsageRegister(HANDLE f, const char *tag, int id, const ResourceSnapshot &info)
 {
 	char buf[256];
 	DWORD written;
@@ -181,7 +180,7 @@ static void DumpUsageRegister(HANDLE f, char *tag, int id, const ResourceSnapsho
 	WriteFile(f, buf, castStrLen(buf), &written, 0);
 }
 
-static void DumpShaderUsageInfo(HANDLE f, std::map<UINT64, ShaderInfoData> *info_map, char *tag)
+static void DumpShaderUsageInfo(HANDLE f, std::map<UINT64, ShaderInfoData> *info_map, const char *tag)
 {
 	std::map<UINT64, ShaderInfoData>::iterator i;
 	std::set<UINT64>::iterator j;
@@ -275,7 +274,7 @@ void DumpUsage(wchar_t *dir)
 // Make a snapshot of the backbuffer, with the current shader disabled, as a good piece
 // of documentation.  The name will include the hash code, making a direct shader reference.
 template <typename HashType>
-static void SimpleScreenShot(HackerDevice *pDevice, HashType hash, char *shaderType)
+static void SimpleScreenShot(HackerDevice *pDevice, HashType hash, const char *shaderType)
 {
 	wchar_t fullName[MAX_PATH];
 	ID3D11Texture2D *backBuffer;
@@ -304,7 +303,7 @@ static void SimpleScreenShot(HackerDevice *pDevice, HashType hash, char *shaderT
 }
 
 template <typename HashType>
-static void MarkingScreenShots(HackerDevice *device, HashType hash, char *short_type)
+static void MarkingScreenShots(HackerDevice *device, HashType hash, const char *short_type)
 {
 	if (!hash || hash == (HashType)-1)
 		return;
@@ -392,7 +391,6 @@ void MigotoIncludeHandler::push_dir(const char *path)
 
 STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFileName, LPCVOID pParentData, LPCVOID *ppData, UINT *pBytes)
 {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> codec;
 	char *buf = NULL;
 	DWORD size, read;
 	string apath;
@@ -420,7 +418,7 @@ STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFi
 		apath = dir_stack.back() + pFileName;
 	else
 		apath = dir_stack.front() + pFileName;
-	wpath = codec.from_bytes(apath);
+	wpath = utf8_to_wstring(apath);
 
 	f = CreateFile(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (f == INVALID_HANDLE_VALUE && !G->recursive_include) {
@@ -435,7 +433,7 @@ STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFi
 		// vs UPlay), so we disallow this if recursive_include is
 		// enabled as that already disables backwards compatibility.
 		apath = pFileName;
-		wpath = codec.from_bytes(apath);
+		wpath = utf8_to_wstring(apath);
 		f = CreateFile(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	}
 	if (f == INVALID_HANDLE_VALUE) {
@@ -636,8 +634,7 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 
 	// For success, let's add the first line of text from the file to the OriginalShaderInfo,
 	// so the ShaderHacker can edit the line and reload and have it live.
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-	headerLine = utf8_to_utf16.from_bytes(srcData.data(), strchr(srcData.data(), '\n'));
+	headerLine = utf8_to_wstring(srcData.data(), strchr(srcData.data(), '\n'));
 
 	// pCode on return == NULL for error cases, valid if made it this far.
 	*pCode = pByteCode;
@@ -704,7 +701,7 @@ static bool ReloadShader(wchar_t *shaderPath, wchar_t *fileName, HackerDevice *d
 	// This needs to use the value to find the key, so a linear search.
 	// It's notable that the map can contain multiple copies of the same hash, used for different visual
 	// items, but with same original code.  We need to update all copies.
-	for each (pair<ID3D11DeviceChild *, OriginalShaderInfo> iter in G->mReloadedShaders)
+	for (pair<ID3D11DeviceChild *, OriginalShaderInfo> iter : G->mReloadedShaders)
 	{
 		if (iter.second.hash == hash)
 		{
@@ -966,7 +963,7 @@ static bool check_shader_file_already_exists(wchar_t *path, bool bin)
 	return true;
 }
 
-static bool shader_already_dumped(UINT64 hash, char *type)
+static bool shader_already_dumped(UINT64 hash, const char *type)
 {
 	wchar_t path[MAX_PATH];
 	int ret = 0;
@@ -1010,7 +1007,7 @@ static void CopyToFixes(UINT64 hash, HackerDevice *device)
 	string asmText, hlslText, errText;
 
 	// The key of the map is the actual shader, we thus need to do a linear search to find our marked hash.
-	for each (pair<ID3D11DeviceChild *, OriginalShaderInfo> iter in G->mReloadedShaders)
+	for (pair<ID3D11DeviceChild *, OriginalShaderInfo> iter : G->mReloadedShaders)
 	{
 		if (iter.second.hash == hash)
 		{
@@ -1342,7 +1339,7 @@ static void NextMarkingMode(HackerDevice *device, void *private_data)
 }
 
 template <typename ItemType>
-static void HuntNext(char *type, std::set<ItemType> *visited,
+static void HuntNext(const char *type, std::set<ItemType> *visited,
 	ItemType *selected, int *selectedPos)
 {
 	if (G->hunting != HUNTING_MODE_ENABLED)
@@ -1350,8 +1347,8 @@ static void HuntNext(char *type, std::set<ItemType> *visited,
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	{
-		std::set<ItemType>::iterator loc = visited->find(*selected);
-		std::set<ItemType>::iterator end = visited->end();
+		typename std::set<ItemType>::iterator loc = visited->find(*selected);
+		typename std::set<ItemType>::iterator end = visited->end();
 		bool found = (loc != end);
 		int size = (int) visited->size();
 
@@ -1375,7 +1372,7 @@ static void HuntNext(char *type, std::set<ItemType> *visited,
 				it = visited->begin();
 				*selectedPos = 0;
 			} else {
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {
@@ -1469,7 +1466,7 @@ static void NextRenderTarget(HackerDevice *device, void *private_data)
 }
 
 template <typename ItemType>
-static void HuntPrev(char *type, std::set<ItemType> *visited,
+static void HuntPrev(const char *type, std::set<ItemType> *visited,
 		ItemType *selected, int *selectedPos)
 {
 	if (G->hunting != HUNTING_MODE_ENABLED)
@@ -1477,9 +1474,9 @@ static void HuntPrev(char *type, std::set<ItemType> *visited,
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	{
-		std::set<ItemType>::iterator loc = visited->find(*selected);
-		std::set<ItemType>::iterator end = visited->end();
-		std::set<ItemType>::iterator front = visited->begin();
+		typename std::set<ItemType>::iterator loc = visited->find(*selected);
+		typename std::set<ItemType>::iterator end = visited->end();
+		typename std::set<ItemType>::iterator front = visited->begin();
 		bool found = (loc != end);
 		int size = (int) visited->size();
 
@@ -1504,7 +1501,7 @@ static void HuntPrev(char *type, std::set<ItemType> *visited,
 				*selectedPos = size - 1;
 			} else {
 				--it;
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {
@@ -1611,7 +1608,7 @@ static void PrevRenderTarget(HackerDevice *device, void *private_data)
 }
 
 template <typename HashType>
-static void HashToClipboard(char *type, HashType hash)
+static void HashToClipboard(const char *type, HashType hash)
 {
 	HGLOBAL hMem;
 	int hash_len = sizeof(HashType) * 2;
@@ -1695,7 +1692,7 @@ static void MarkIndexBuffer(HackerDevice *device, void *private_data)
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 
-static bool MarkShaderBegin(char *type, UINT64 selected)
+static bool MarkShaderBegin(const char *type, UINT64 selected)
 {
 	if (G->hunting != HUNTING_MODE_ENABLED)
 		return false;
@@ -1706,7 +1703,7 @@ static bool MarkShaderBegin(char *type, UINT64 selected)
 
 	return true;
 }
-static void MarkShaderEnd(HackerDevice *device, char *long_type, char *short_type, UINT64 selected)
+static void MarkShaderEnd(HackerDevice *device, const char *long_type, const char *short_type, UINT64 selected)
 {
 	// Clears any notices currently displayed on the overlay. This ensures
 	// that any notices that haven't timed out yet (e.g. from a previous
@@ -1805,7 +1802,7 @@ static void MarkHullShader(HackerDevice *device, void *private_data)
 	MarkShaderEnd(device, "hull shader", "hs", G->mSelectedHullShader);
 }
 
-static uint32_t LogRenderTarget(ID3D11Resource *target, char *log_prefix)
+static uint32_t LogRenderTarget(ID3D11Resource *target, const char *log_prefix)
 {
 	char buf[256];
 
@@ -2054,7 +2051,7 @@ void ParseHuntingSection()
 
 	G->frame_analysis_registered = RegisterIniKeyBinding(L"Hunting", L"analyse_frame", AnalyseFrame, AnalyseFrameStop, noRepeat, NULL);
 	if (GetIniStringAndLog(L"Hunting", L"analyse_options", 0, buf, MAX_PATH)) {
-		G->def_analyse_options = parse_enum_option_string<wchar_t *, FrameAnalysisOptions>
+		G->def_analyse_options = parse_enum_option_string<const wchar_t *, FrameAnalysisOptions>
 			(FrameAnalysisOptionNames, buf, NULL);
 	} else
 		G->def_analyse_options = FrameAnalysisOptions::INVALID;

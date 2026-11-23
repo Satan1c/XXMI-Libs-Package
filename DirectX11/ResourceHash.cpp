@@ -1,5 +1,7 @@
 #include "ResourceHash.h"
 
+#include <bit>
+
 #include <INITGUID.h>
 #include "log.h"
 #include "util.h"
@@ -2318,7 +2320,7 @@ void RegionHashesCache::Invalidate(UINT start, UINT end)
 		return;
 
 	UINT end_page = (end - 1) / PAGE_SIZE;
-	end_page = min(end_page, page_versions.size() - 1);
+	end_page = min(end_page, (UINT)(page_versions.size() - 1));
 
 	if (start_page > end_page)
 		return;
@@ -2380,12 +2382,12 @@ void ResourceHandleInfo::SetDataCacheRegion(const void* src, size_t region_size,
 
 	// Cannot write partial region if cache not initialized.
 	if (!cached_data_size) {
-		LogInfo("SetDataCacheRegion Failed (not initialized): offset=%d, region_size=%d!\n", offset, region_size);
+		LogInfo("SetDataCacheRegion Failed (not initialized): offset=%u, region_size=%zu!\n", offset, region_size);
 		return;
 	}
 
 	if (offset > cached_data_size || region_size > cached_data_size - offset){
-		LogInfo("SetDataCacheRegion Failed (out of bounds): offset=%d, region_size=%d, dst_size=%d!\n", offset, region_size, cached_data_size);
+		LogInfo("SetDataCacheRegion Failed (out of bounds): offset=%u, region_size=%zu, dst_size=%zu!\n", offset, region_size, cached_data_size);
 		return;
 	}
 
@@ -2814,7 +2816,7 @@ uint32_t GetRegionHash(HackerContext* context, ID3D11Buffer* buffer, UINT offset
 	}
 
 	// Upper bound of requested region must stay within the buffer size.
-	UINT max_region_size = handle_info->cached_data_size - offset;
+	UINT max_region_size = (UINT)(handle_info->cached_data_size - offset);
 	if (size > max_region_size) {
 		size = max_region_size;
 	}
@@ -2835,20 +2837,6 @@ uint32_t GetRegionHash(HackerContext* context, ID3D11Buffer* buffer, UINT offset
 	//LogInfo("GetRegionHash: New hash: frame=%d, hash=%08lx, offset=%d, size=%d, full_hash=%08lx, pResource=0x%p, cache_size=%d, data_hash=%08lx \n", G->frame_no, hash, offset, size, handle_info->hash, buffer, handle_info->region_hashes_cache->GetSize(), handle_info->cached_data_hash);
 
 	return hash;
-}
-
-float BitCastToFloat(uint32_t bits)
-{
-	float value;
-	memcpy(&value, &bits, sizeof(value));
-	return value;
-}
-
-uint32_t BitCastToUint(float bits)
-{
-	uint32_t value;
-	memcpy(&value, &bits, sizeof(value));
-	return value;
 }
 
 float EncodeFloat30(const uint32_t hash)
@@ -2880,8 +2868,7 @@ float EncodeFloat30(const uint32_t hash)
 	// Construct the final IEEE-754 bit pattern.
 	uint32_t float_bits = (exponent << 23) | mantissa;
 
-	// TODO: Replace with std::bit_cast<float> after C++20 upgrade
-	return BitCastToFloat(float_bits);
+	return std::bit_cast<float>(float_bits);
 }
 
 uint64_t HashPointer(const void* p)

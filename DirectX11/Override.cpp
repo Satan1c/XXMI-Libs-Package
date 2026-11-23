@@ -142,7 +142,7 @@ struct KeyOverrideCycleParam
 			LogInfoNoNL(" %S=%s", name, cur.c_str());
 	}
 
-	float as_float(float default)
+	float as_float(float def)
 	{
 		float val;
 		int n;
@@ -150,12 +150,12 @@ struct KeyOverrideCycleParam
 		n = sscanf_s(cur.c_str(), "%f", &val);
 		if (!n || n == EOF) {
 			// Blank entry
-			return default;
+			return def;
 		}
 		return val;
 	}
 
-	int as_int(int default)
+	int as_int(int def)
 	{
 		int val;
 		int n;
@@ -163,25 +163,25 @@ struct KeyOverrideCycleParam
 		n = sscanf_s(cur.c_str(), "%i", &val);
 		if (!n || n == EOF) {
 			// Blank entry
-			return default;
+			return def;
 		}
 		return val;
 	}
 
 	template <class T1, class T2>
-	T2 as_enum(EnumName_t<T1, T2> *enum_names, T2 default)
+	T2 as_enum(EnumName_t<T1, T2> *enum_names, T2 def)
 	{
 		T2 val;
 
 		if (cur.empty()) {
 			// Blank entry
-			return default;
+			return def;
 		}
 
 		val = lookup_enum_val<T1, T2>(enum_names, cur.c_str(), (T2)-1);
 		if (val == (T2)-1) {
 			LogOverlayW(LOG_WARNING, L"Unmatched value \"%S\"\n", cur.c_str());
-			return default;
+			return def;
 		}
 
 		return val;
@@ -592,7 +592,6 @@ void OverrideTransition::ScheduleTransition(HackerDevice *wrapper,
 		int time, TransitionType transition_type)
 {
 	ULONGLONG now = GetTickCount64();
-	float current;
 	char buf[8];
 	OverrideParams::iterator i;
 	OverrideVars::iterator j;
@@ -659,7 +658,6 @@ void OverrideTransition::UpdateTransitions(HackerDevice *wrapper)
 	std::map<OverrideParam, OverrideTransitionParam>::iterator i;
 	std::map<CommandListVariable*, OverrideTransitionParam>::iterator j;
 	ULONGLONG now = GetTickCount64();
-	float val;
 
 	if (!params.empty()) {
 		LogDebugNoNL(" IniParams remapped to ");
@@ -726,8 +724,6 @@ float OverrideGlobalSaveParam::Reset()
 
 void OverrideGlobalSave::Reset(HackerDevice* wrapper)
 {
-	float val;
-
 	params.clear();
 	vars.clear();
 

@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <array>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <forward_list>
@@ -196,7 +197,7 @@ public:
 
 	bool SetSourceCommandList(CommandList* source);
 	CommandList* ResolveCommandList();
-	bool CommandList::noop();
+	bool noop();
 
 	CommandList() :
 		post(false),
@@ -1803,7 +1804,7 @@ public:
 		scissor(0)
 	{}
 
-	bool parse_float(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
+	bool parse_float(std::wstring_view operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
 	bool parse_ini_param(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_variable(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_slot(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
@@ -1954,11 +1955,11 @@ public:
 	CommandListExpression args[5];
 	ResourceCopyTarget indirect_buffer;
 
-	DrawCommand::DrawCommand() :
+	DrawCommand() :
 		type(DrawCommandType::INVALID)
 	{}
 
-	void do_indirect_draw_call(CommandListState *state, char *name,
+	void do_indirect_draw_call(CommandListState *state, const char *name,
 		void (__stdcall ID3D11DeviceContext::*IndirectDrawCall)(THIS_
 		ID3D11Buffer *pBufferForArgs,
 		UINT AlignedByteOffsetForArgs));
