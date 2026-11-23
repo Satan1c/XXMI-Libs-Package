@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <array>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <forward_list>
@@ -28,8 +29,8 @@ class HackerDevice;
 class HackerContext;
 enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
-struct ResolvedResource;
 class ResourceFilterTarget;
+namespace SoundEngine { class Section; }
 
 struct InputLayoutElementOverride {
 	struct Match {
@@ -86,14 +87,6 @@ public:
 	ID3D11ShaderResourceView *cursor_mask_view;
 	ID3D11ShaderResourceView *cursor_color_view;
 	RECT window_rect;
-
-	// Resources resolved by a property read while an expression is being
-	// evaluated, in storage ResolvedResourceScope owns for the length of that
-	// evaluation. Null in between, which is what stops a resolve outliving the
-	// one place where nothing can rebind what it read.
-	ResolvedResource *resolved_resources;
-	unsigned resolved_count;
-	unsigned resolved_capacity;
 
 	int recursion;
 	int extra_indent;
@@ -626,11 +619,6 @@ public:
 	UINT buf_size;
 	DXGI_FORMAT format;
 
-	// Applied whenever this resource is bound to a UAV slot. -1 leaves the
-	// count alone, and is all D3D11 ever does for a view not created as an
-	// append or counter buffer:
-	UINT uav_counter;
-
 	UINT source_stride;
 
 	int max_copies_per_frame;
@@ -1108,88 +1096,20 @@ struct ResourceCopyInfo {
 	UINT offset = 0; // In bytes
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 	UINT size = 0;   // In bytes
-	// Applied if this ends up in a UAV slot. -1 leaves the count alone:
-	UINT uav_counter = (UINT)-1;
 
 	ResourceCopyInfo() {}
 	ResourceCopyInfo(ID3D11Resource *resource, ID3D11View *view) :
 		resource(resource), view(view)
 	{}
 
-	// Adopts the layout, and the UAV count, of the other side of the copy;
+	// Adopts the layout of the other side of the copy;
 	// keeps the resource, view and size of this one:
 	void TakeLayoutFrom(const ResourceCopyInfo &other)
 	{
 		stride = other.stride;
 		offset = other.offset;
 		format = other.format;
-		uav_counter = other.uav_counter;
 	}
-};
-
-// D3D11 keeps a resource's description behind a GetDesc() of its own per
-// dimension, with no field in common between the four. This is whichever one
-// applies, in the shape the <target>->Property accessors ask about.
-struct ResourceDescInfo {
-	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-	UINT width = 0;       // ByteWidth for a buffer
-	UINT height = 0;      // 1 for a 1D texture, 0 for a buffer
-	UINT array_size = 0;  // 1D and 2D textures only
-	UINT mip_levels = 0;  // Textures only
-	UINT stride = 0;      // StructureByteStride, buffers only
-	UINT bind_flags = 0;
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // Buffers have none
-
-	bool is_buffer() const { return dimension == D3D11_RESOURCE_DIMENSION_BUFFER; }
-	// A 3D texture has depth where the other two have an array size,
-	// so it is not one of these:
-	bool has_array() const
-	{
-		return dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D
-			|| dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D;
-	}
-	bool is_texture() const
-	{
-		return has_array() || dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
-	}
-};
-
-// What two property reads have to agree on to be reading the same resource.
-// Not the ResourceCopyTarget itself: every operand of an expression holds its
-// own copy of the target it reads, so `ps-t0->Width` and `ps-t0->Height` arrive
-// as two targets naming one slot. Every field is a plain member of the target,
-// so building a key resolves nothing and costs nothing.
-struct ResolvedResourceKey {
-	ResourceCopyTargetType type = ResourceCopyTargetType::INVALID;
-	wchar_t shader_type = L'\0';
-	unsigned slot = 0;
-	// A custom resource named directly, or indexed statically (PoolFoo[0]):
-	const CustomResource *custom_resource = nullptr;
-	// A bare pool, which answers for its template, and tells two of them apart:
-	const CustomResourcePool *pool = nullptr;
-
-	bool operator==(const ResolvedResourceKey &other) const
-	{
-		return type == other.type && shader_type == other.shader_type
-			&& slot == other.slot && custom_resource == other.custom_resource
-			&& pool == other.pool;
-	}
-};
-
-// A target resolved to what it holds, with the description read off it at most
-// once however many properties ask. Owns the references it resolved.
-struct ResolvedResource {
-	ResolvedResourceKey key;
-	ResourceCopyInfo info;
-
-	// Only once info.resource is known to be there - a target with nothing
-	// bound resolves to no resource, and has no description to read:
-	const ResourceDescInfo &Description();
-	void Release();
-
-private:
-	ResourceDescInfo desc;
-	bool described = false;
 };
 
 class ResourceCopyTarget : public SyntaxTarget
@@ -1243,10 +1163,10 @@ public:
 	CommandListVariable* GetPoolVariable(CommandListState* state, bool is_assignment = false);
 	ResourceFilter* GetSlotFilter() { return slot_filter ? slot_filter->ResolveFilter() : nullptr; };
 
-	// What the target holds right now, with the layout it is bound with filled
-	// into info. The caller owns a reference on the resource returned and on
-	// info->view, and info->resource is left alone. dst is only used to
-	// substantiate a custom resource with the bind flags its destination needs.
+	// What the target holds right now, with the layout it is bound with filled into info.
+	// The caller owns a reference on the resource returned and on info->view,
+	// and info->resource is left alone.
+	// dst is only used to substantiate a custom resource with the bind flags its destination needs.
 	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
@@ -1275,13 +1195,12 @@ public:
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
 private:
-	// What every <target>->Property accessor shares. ResourceProperty() resolves
-	// the target, hands read() the resource, and releases what it resolved;
-	// PropertyCustomResource() is the metadata a custom resource answers from
-	// first; BufferRegionOffset() is where in a buffer slot the contents start.
+	// What every <target>->Property accessor shares.
+	// ResourceProperty() resolves the target, hands read() the resource, and releases what it resolved;
+	// PropertyCustomResource() is the metadata a custom resource answers from first;
+	// BufferRegionOffset() is where in a buffer slot the contents start.
 	template <typename ReadProperty>
 	float ResourceProperty(CommandListState *state, ReadProperty read);
-	ResolvedResource *ResolveForProperty(CommandListState *state, ResolvedResource *local);
 	bool PropertyCustomResource(CommandListState *state, CustomResource **custom_resource);
 	UINT BufferRegionOffset(CommandListState *state, const ResourceCopyInfo &info);
 
@@ -1878,6 +1797,8 @@ enum class ParamOverrideType {
 	FRAME_TIME,
 	FPS,
 	RESOURCE_FILTER,
+	SOUND,	// Needs a [Sound*] and one of its properties:
+		// SoundFoo->Position, parsed by parse_sound().
 };
 static EnumName_t<const wchar_t *, ParamOverrideType> ParamOverrideTypeNames[] = {
 	{L"rt_width", ParamOverrideType::RT_WIDTH},
@@ -1925,6 +1846,26 @@ static EnumName_t<const wchar_t *, ParamOverrideType> ParamOverrideTypeNames[] =
 	{L"resource_filter", ParamOverrideType::RESOURCE_FILTER},
 	{NULL, ParamOverrideType::INVALID} // End of list marker
 };
+
+// What `SoundFoo->Position` and its like read off a [Sound*].
+// Both times are in milliseconds, as the offset `play` takes is.
+enum class SoundProperty {
+	INVALID,
+	POSITION,
+	LENGTH,
+	PLAYING,
+	SPEED,
+	VOLUME,
+};
+static EnumName_t<const wchar_t *, SoundProperty> SoundPropertyNames[] = {
+	{L"position", SoundProperty::POSITION},
+	{L"length", SoundProperty::LENGTH},
+	{L"playing", SoundProperty::PLAYING},
+	{L"speed", SoundProperty::SPEED},
+	{L"volume", SoundProperty::VOLUME},
+	{NULL, SoundProperty::INVALID} // End of list marker
+};
+
 class CommandListOperand :
 	public CommandListToken,
 	public CommandListOperandBase,
@@ -1952,6 +1893,10 @@ public:
 	// For scissor rectangle:
 	unsigned scissor;
 
+	// For SOUND type:
+	SoundEngine::Section *sound;
+	SoundProperty sound_property;
+
 	CommandListOperand(size_t pos, wstring token=L"") :
 		CommandListToken(pos, token),
 		type(ParamOverrideType::INVALID),
@@ -1959,10 +1904,12 @@ public:
 		param_component(NULL),
 		param_idx(0),
 		var_ftarget(NULL),
-		scissor(0)
+		scissor(0),
+		sound(NULL),
+		sound_property(SoundProperty::INVALID)
 	{}
 
-	bool parse_float(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
+	bool parse_float(std::wstring_view operand, const wstring* ini_namespace, CommandListScope* scope, size_t& out_length);
 	bool parse_ini_param(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_variable(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_slot(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
@@ -1970,6 +1917,7 @@ public:
 	bool parse_shader(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_resource_filter(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_scissor(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
+	bool parse_sound(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 	bool parse_ini_keywords(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope);
 
 	float evaluate(CommandListState *state, HackerDevice *device=NULL) override;
@@ -1977,29 +1925,11 @@ public:
 	bool optimise(HackerDevice *device, std::shared_ptr<CommandListEvaluatable> *replacement) override;
 };
 
-// Holds the resolves made while one expression is evaluated, so that every
-// property read of one resource shares a single resolve of it.
-class ResolvedResourceScope {
-public:
-	explicit ResolvedResourceScope(CommandListState *state);
-	~ResolvedResourceScope();
-
-private:
-	// Enough for the expressions that read more than one property of a thing:
-	// an aspect ratio, a stride beside a size. A fifth resource in one
-	// expression resolves on its own, as all of them did before.
-	ResolvedResource resolved[4];
-	CommandListState *owner; // Null unless this scope is the one that opened it
-};
-
 class CommandListExpression {
 public:
 	std::shared_ptr<CommandListEvaluatable> evaluatable;
 
 	bool parse(const wstring *expression, const wstring *ini_namespace, CommandListScope *scope);
-	// Compound assignment: the expression "target op (rhs)",
-	// e.g. "$x + (1)" for "$x += 1", built from the tokens of both sides.
-	bool parse_compound(const wstring *target, const wstring *op, const wstring *rhs, const wstring *ini_namespace, CommandListScope *scope);
 	float evaluate(CommandListState *state, HackerDevice *device=NULL);
 	bool static_evaluate(float *ret, HackerDevice *device=NULL, bool evaluate_variables=false);
 	bool optimise(HackerDevice *device);
@@ -2173,6 +2103,27 @@ public:
 	void SetOutputValue(CommandListState* state, float value);
 };
 
+// play = SoundFoo, or play = SoundFoo, <expression> to begin that many
+// milliseconds in. A [Sound*] with overlap starts a voice of its own each time;
+// one without restarts the single voice it owns.
+class PlaySoundCommand : public CommandListCommand {
+public:
+	SoundEngine::Section *sound = nullptr;
+	// Empty unless the line gave a start offset:
+	std::unique_ptr<CommandListExpression> start_ms = nullptr;
+
+	void run(CommandListState*) override;
+};
+
+// stop = SoundFoo. Nothing to stop on a section that overlaps, since each of
+// its plays belongs to the engine.
+class StopSoundCommand : public CommandListCommand {
+public:
+	SoundEngine::Section *sound = nullptr;
+
+	void run(CommandListState*) override;
+};
+
 class ClearViewCommand : public CommandListCommand {
 public:
 	ResourceCopyTarget target;
@@ -2292,12 +2243,8 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 		const wstring *ini_namespace);
 bool ParseCommandListIniParamOverride(const wchar_t *section,
 		const wchar_t *key, wstring *val, CommandList *command_list,
-		const wstring *ini_namespace, const wstring *compound_op = NULL);
+		const wstring *ini_namespace);
 bool ParseCommandListVariableAssignment(const wchar_t *section,
-		const wchar_t *key, wstring *val, const wstring *raw_line,
-		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
-		const wstring *ini_namespace, const wstring *compound_op = NULL);
-bool ParseCommandListCompoundAssignment(const wchar_t *section,
 		const wchar_t *key, wstring *val, const wstring *raw_line,
 		CommandList *command_list, CommandList *pre_command_list, CommandList *post_command_list,
 		const wstring *ini_namespace);

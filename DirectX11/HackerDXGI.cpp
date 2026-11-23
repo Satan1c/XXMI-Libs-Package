@@ -59,6 +59,7 @@
 #include "lock.h"
 
 #include "HackerDXGI.h"
+#include "SoundEngine.h"
 #include "HookedDevice.h"
 #include "HookedDXGI.h"
 
@@ -242,6 +243,10 @@ void HackerSwapChain::RunFrameActions()
 	// point, we should consider making an explicit "pre" command list for
 	// that purpose rather than breaking the existing behaviour.
 	bool newEvent = DispatchInputEvents(mHackerDevice);
+
+	// Retires finished one-shots and picks up an audio device change.
+	// Does nothing at all until an ini has asked for a sound:
+	SoundEngine::sound_engine_update();
 
 	CurrentTransition.UpdatePresets(mHackerDevice);
 	CurrentTransition.UpdateTransitions(mHackerDevice);
@@ -558,11 +563,11 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 			if (G->overlay_buffer_hash_lifetime >= 0)
 				PurgeStaleVisitedBufferHashes(mHackerDevice);
 			if (G->mSelectedIndexBufferPos == INT_MAX) {
-				G->mSelectedIndexBufferPos = G->mVisitedIndexBuffers.size() - 1;
+				G->mSelectedIndexBufferPos = (int)G->mVisitedIndexBuffers.size() - 1;
 				G->mSelectedIndexBuffer = *std::prev(G->mVisitedIndexBuffers.end());
 			}
 			if (G->mSelectedVertexBufferPos == INT_MAX) {
-				G->mSelectedVertexBufferPos = G->mVisitedVertexBuffers.size() - 1;
+				G->mSelectedVertexBufferPos = (int)G->mVisitedVertexBuffers.size() - 1;
 				G->mSelectedVertexBuffer = *std::prev(G->mVisitedVertexBuffers.end());
 			}
 			if (G->gResetSelectedVertexBufferSlotId) {

@@ -60,8 +60,8 @@ extern bool gLogDebug;
 #define LogDebugNoNL LogDebug
 #define LogDebugWNoNL LogDebugW
 
-// Overlay notification levels. Declared here rather than in Overlay.h so
-// that templates in util.h can refer to them: with two-phase lookup
+// Overlay notification levels, declared here rather than in Overlay.h:
+// templates in util.h refer to them, and with two-phase lookup
 // (/permissive-) non-dependent names must be declared before the template.
 enum LogLevel {
 	LOG_DIRE,

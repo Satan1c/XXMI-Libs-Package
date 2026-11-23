@@ -3,7 +3,6 @@
 #include <string>
 #include <sstream>
 #include <D3Dcompiler.h>
-#include <codecvt>
 
 #include "ScreenGrab.h"
 #include "wincodec.h"
@@ -365,22 +364,6 @@ MigotoIncludeHandler::MigotoIncludeHandler(const char *path)
 	push_dir(path);
 }
 
-ShaderCompileMacros::ShaderCompileMacros(const D3D_SHADER_MACRO *extra)
-{
-	for (; extra && extra->Name; extra++)
-		macros.push_back(*extra);
-
-	// ini_params=-1 turns IniParams off altogether, and then there is no
-	// register to point a shader at. Leaving the definition out makes such a
-	// shader fail to compile instead of binding something unrelated:
-	if (G->IniParamsReg >= 0) {
-		sprintf_s(ini_params_register, sizeof(ini_params_register), "t%i", G->IniParamsReg);
-		macros.push_back({ "INI_PARAMS_REGISTER", ini_params_register });
-	}
-
-	macros.push_back({ NULL, NULL });
-}
-
 // This tracks any directories mentioned when including files, so that files in
 // those directories can include other files relative to themselves rather than
 // having to specify the include path relative to the initial source file.
@@ -408,7 +391,6 @@ void MigotoIncludeHandler::push_dir(const char *path)
 
 STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFileName, LPCVOID pParentData, LPCVOID *ppData, UINT *pBytes)
 {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> codec;
 	char *buf = NULL;
 	DWORD size, read;
 	string apath;
@@ -436,7 +418,7 @@ STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFi
 		apath = dir_stack.back() + pFileName;
 	else
 		apath = dir_stack.front() + pFileName;
-	wpath = codec.from_bytes(apath);
+	wpath = utf8_to_wstring(apath);
 
 	f = CreateFile(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (f == INVALID_HANDLE_VALUE && !G->recursive_include) {
@@ -451,7 +433,7 @@ STDMETHODIMP MigotoIncludeHandler::Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFi
 		// vs UPlay), so we disallow this if recursive_include is
 		// enabled as that already disables backwards compatibility.
 		apath = pFileName;
-		wpath = codec.from_bytes(apath);
+		wpath = utf8_to_wstring(apath);
 		f = CreateFile(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	}
 	if (f == INVALID_HANDLE_VALUE) {
@@ -563,6 +545,8 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 		LogInfo("    Reload source code loaded. Size = %d\n", srcDataSize);
 		LogInfo("    compiling replacement HLSL code with shader model %s\n", shaderModel);
 
+		// TODO: Add #defines for IniParams
+
 		ID3DBlob* pErrorMsgs = nullptr;
 		// Pass the real filename and use the standard include handler so that
 		// #include will work with a relative path from the shader itself.
@@ -570,8 +554,7 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 		// that we can make reloading work better when using includes:
 		wcstombs(apath, fullName, MAX_PATH);
 		MigotoIncludeHandler include_handler(apath);
-		ShaderCompileMacros macros;
-		HRESULT ret = D3DCompile(srcData.data(), srcDataSize, apath, macros.Get(),
+		HRESULT ret = D3DCompile(srcData.data(), srcDataSize, apath, 0,
 				G->recursive_include == -1 ? D3D_COMPILE_STANDARD_FILE_INCLUDE : &include_handler,
 			"main", shaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pByteCode, &pErrorMsgs);
 
@@ -651,8 +634,7 @@ static bool RegenerateShader(wchar_t *shaderFixPath, wchar_t *fileName, const ch
 
 	// For success, let's add the first line of text from the file to the OriginalShaderInfo,
 	// so the ShaderHacker can edit the line and reload and have it live.
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-	headerLine = utf8_to_utf16.from_bytes(srcData.data(), strchr(srcData.data(), '\n'));
+	headerLine = utf8_to_wstring(srcData.data(), strchr(srcData.data(), '\n'));
 
 	// pCode on return == NULL for error cases, valid if made it this far.
 	*pCode = pByteCode;
@@ -1390,7 +1372,7 @@ static void HuntNext(const char *type, std::set<ItemType> *visited,
 				it = visited->begin();
 				*selectedPos = 0;
 			} else {
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {
@@ -1519,7 +1501,7 @@ static void HuntPrev(const char *type, std::set<ItemType> *visited,
 				*selectedPos = size - 1;
 			} else {
 				--it;
-				*selectedPos = std::distance(visited->begin(), it);
+				*selectedPos = (int)std::distance(visited->begin(), it);
 			}
 			*selected = *it;
 		} else {

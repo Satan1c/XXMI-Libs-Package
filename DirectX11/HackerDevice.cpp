@@ -17,7 +17,6 @@
 #include "FrameAnalysis.h"
 
 #include <D3Dcompiler.h>
-#include <codecvt>
 
 #include "log.h"
 #include "util.h"
@@ -752,8 +751,7 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// Any HLSL compiled shaders are reloading candidates, if moved to ShaderFixes
 			pShaderModel = shaderModel;
 			pTimeStamp = ftWrite;
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-			pHeaderLine = utf8_to_utf16.from_bytes(srcData, strchr(srcData, '\n'));
+			pHeaderLine = utf8_to_wstring(srcData, strchr(srcData, '\n'));
 
 			// Way too many obscure interractions in this function, using another
 			// temporary variable to not modify anything already here and reduce
@@ -769,6 +767,8 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// Compile replacement.
 			LogInfo("    compiling replacement HLSL code with shader model %s\n", tmpShaderModel);
 
+			// TODO: Add #defines for StereoParams and IniParams
+
 			ID3DBlob *errorMsgs = nullptr;
 			ID3DBlob *compiledOutput = 0;
 			// Pass the real filename and use the standard include handler so that
@@ -777,8 +777,7 @@ static bool ReplaceHLSLShader(__in UINT64 hash, const wchar_t *pShaderType,
 			// that we can make reloading work better when using includes:
 			wcstombs(apath, path, MAX_PATH);
 			MigotoIncludeHandler include_handler(apath);
-			ShaderCompileMacros macros;
-			HRESULT ret = D3DCompile(srcData, srcDataSize, apath, macros.Get(),
+			HRESULT ret = D3DCompile(srcData, srcDataSize, apath, 0,
 				G->recursive_include == -1 ? D3D_COMPILE_STANDARD_FILE_INCLUDE : &include_handler,
 				"main", tmpShaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &compiledOutput, &errorMsgs);
 			delete[] srcData; srcData = 0;
@@ -881,8 +880,7 @@ static bool ReplaceASMShader(__in UINT64 hash, const wchar_t *pShaderType, const
 			// Any ASM shaders are reloading candidates, if moved to ShaderFixes
 			pShaderModel = shaderModel;
 			pTimeStamp = ftWrite;
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf8_to_utf16;
-			pHeaderLine = utf8_to_utf16.from_bytes(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
+			pHeaderLine = utf8_to_wstring(asmTextBytes.data(), strchr(asmTextBytes.data(), '\n'));
 
 			vector<byte_t> byteCode(pBytecodeLength);
 			memcpy(byteCode.data(), pShaderBytecode, pBytecodeLength);
@@ -1047,6 +1045,8 @@ static bool DecompileAndPossiblyPatchShader(__in UINT64 hash,
 
 	LogInfo("    compiling fixed HLSL code with shader model %s, size = %Iu\n", tmpShaderModel, decompiledCode.size());
 
+	// TODO: Add #defines for StereoParams and IniParams
+
 	ID3DBlob *pErrorMsgs = nullptr;
 	ID3DBlob *pCompiledOutput = NULL;
 	// Probably unecessary here since this shader is one we freshly decompiled,
@@ -1054,8 +1054,7 @@ static bool DecompileAndPossiblyPatchShader(__in UINT64 hash,
 	// include handler can correctly handle includes with paths relative to the
 	// shader itself:
 	wcstombs(apath, val, MAX_PATH);
-	ShaderCompileMacros macros;
-	hr = D3DCompile(decompiledCode.c_str(), decompiledCode.size(), apath, macros.Get(), D3D_COMPILE_STANDARD_FILE_INCLUDE,
+	hr = D3DCompile(decompiledCode.c_str(), decompiledCode.size(), apath, 0, D3D_COMPILE_STANDARD_FILE_INCLUDE,
 		"main", tmpShaderModel, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pCompiledOutput, &pErrorMsgs);
 	LogInfo("    compile result of fixed HLSL shader: %x\n", hr);
 
@@ -1638,7 +1637,7 @@ STDMETHODIMP HackerDevice::CreateUnorderedAccessView(THIS_
 				}
 			}
 
-			if (override_num_elements != -1 && pDesc->Buffer.NumElements < override_num_elements) {
+			if (override_num_elements != -1 && pDesc->Buffer.NumElements < (UINT)override_num_elements) {
 				D3D11_UNORDERED_ACCESS_VIEW_DESC pNewDesc = *pDesc;
 				pNewDesc.Buffer.NumElements = override_num_elements;
 				//LogOverlayW(LOG_INFO, L"UAV resized: %d->%d\n", pDesc->Buffer.NumElements, override_num_elements);
@@ -2077,7 +2076,7 @@ static void override_resource_desc_common_2d_3d(DescType *desc, TextureOverride 
 
 static void override_resource_desc(D3D11_BUFFER_DESC *desc, TextureOverride *textureOverride) {
 	if (textureOverride->override_byte_width != -1) {
-		if (desc->ByteWidth < textureOverride->override_byte_width) {
+		if (desc->ByteWidth < (UINT)textureOverride->override_byte_width) {
 			LogInfo("  resizing buffer: %d->%d\n", desc->ByteWidth, textureOverride->override_byte_width);
 			//LogOverlayW(LOG_WARNING, L"Buffer resized: %d->%d\n - [%s]\n", desc->ByteWidth, textureOverride->override_byte_width, textureOverride->ini_section.c_str());
 			desc->ByteWidth = textureOverride->override_byte_width;

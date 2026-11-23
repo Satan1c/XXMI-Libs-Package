@@ -5,10 +5,11 @@
 * [Commands](commands/README.md) — new commands
 * [Command Lists](command-lists/README.md) — extended recursion and callback support
 * [Runtime Parameters](parameters/README.md) — new values provided by the runtime
-* [Expressions](expressions/README.md) — new operators, compound assignment and functions
+* [Expressions](expressions/README.md) — new operators and functions
 * [Variables](variables/README.md) — extended variable declarations and read-only mode
 * [Resources](resources/README.md) — resource metadata, buffer region and slot range support
 * [Filters](filters/README.md) — reusable resource-matching criteria, currently focused on dHash-based texture identification and filtering
 * [Pools](pools/README.md) — indexed storage for resources and variables
 * [Input Layouts](input-layouts/README.md) — vertex input layout overrides
+* [Sounds](sounds/README.md) — playing sound from an INI
 * [Examples](examples/README.md) — practical scripts combining the extensions above

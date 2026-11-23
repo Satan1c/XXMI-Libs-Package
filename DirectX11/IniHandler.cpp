@@ -1,14 +1,16 @@
 #include "IniHandler.h"
+#include "SoundEngine.h"
 
 #include <algorithm>
+#include <charconv>
 #include <iterator>
 #include <string>
 #include <strsafe.h>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 #include <memory>
 #include <pcre2.h>
-#include <codecvt>
 
 #include "log.h"
 #include "Globals.h"
@@ -65,6 +67,7 @@ static Section RegularSections[] = {
 	{L"Pool", true},
 	{L"Resource", true},
 	{L"Filter", true},
+	{L"Sound", true},
 	{L"Key", true},
 	{L"Include", true}, // Prefix so that it may be namespaced to allow included files to include more files with relative paths
 	{L"Preset", true},
@@ -659,13 +662,26 @@ static void ParseIniExcerpt(const wchar_t *excerpt)
 // it, make sure you delay calling it until after the log file has been opened!
 static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namespace)
 {
-	wifstream f(ini, ios::in, _SH_DENYNO);
+	// Read the file as UTF-8 (text mode, as the wifstream was) and convert
+	// it up front rather than imbuing a wifstream with the deprecated
+	// <codecvt> facet.
+	FILE *f = _wfsopen(ini, L"rt", _SH_DENYNO);
 	if (!f) {
 		LogOverlay(LOG_WARNING, "  Error opening %S\n", ini);
 		return;
 	}
-	f.imbue(std::locale(f.getloc(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::consume_header>));
-	ParseIniStream(&f, ini_namespace);
+	string bytes;
+	char buf[4096];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+		bytes.append(buf, n);
+	fclose(f);
+
+	// Skip a UTF-8 BOM if present (the old consume_header facet did this).
+	size_t start = (bytes.size() >= 3 && (unsigned char)bytes[0] == 0xEF && (unsigned char)bytes[1] == 0xBB && (unsigned char)bytes[2] == 0xBF) ? 3 : 0;
+
+	std::wistringstream stream(utf8_to_wstring(bytes.data() + start, bytes.data() + bytes.size()));
+	ParseIniStream(&stream, ini_namespace);
 }
 
 static void ParseIniFile(const wchar_t *ini)
@@ -1032,7 +1048,7 @@ inline std::wstring NormalizeString(const std::wstring& value)
 	return normalized;
 }
 
-bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size_t& length)
+bool ParseBinaryLiterals(std::wstring_view input, size_t start, uint64_t& out, size_t& length)
 {
 	uint64_t value = 0;
 	length = 0;
@@ -1058,6 +1074,40 @@ bool ParseBinaryLiterals(const wstring& input, size_t start, uint64_t& out, size
 		return false;
 
 	out = value;
+	return true;
+}
+
+// std::from_chars reports overflow and underflow alike as
+// errc::result_out_of_range and leaves the output untouched, but callers
+// want ±inf for overflow and ±0 for underflow (what strtof produces).
+// Tells the two apart for the literal in [first, last) that a float
+// from_chars call with the same `format` already accepted up to `last`.
+//
+// A double parse settles anything between float and double range
+// (1e-50, 1e300). If even that is out of range the text decides: a
+// negative exponent (1e-999) or, without an exponent, an all-zero integer
+// part (0.000...0001) means the value is tiny; anything else is huge.
+bool FloatLiteralUnderflows(const char* first, const char* last, std::chars_format format)
+{
+	double wide;
+	std::from_chars_result result = std::from_chars(first, last, wide, format);
+	if (result.ec == std::errc())
+		return std::fabs(wide) < 1.0;
+
+	// Hex literals use 'p' for the exponent ('e' is a digit there).
+	const bool hex = format == std::chars_format::hex;
+	for (const char* p = first; p != last; ++p)
+	{
+		const bool exponent = hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E');
+		if (exponent)
+			return p + 1 != last && p[1] == '-';
+	}
+
+	for (const char* p = first; p != last && *p != '.'; ++p)
+	{
+		if (*p != '0' && *p != '+' && *p != '-')
+			return false;
+	}
 	return true;
 }
 
@@ -1176,20 +1226,43 @@ inline bool ConvertExpressionToFloat(float expr, float& out) noexcept
 	return true;
 }
 
+// std::from_chars only accepts narrow characters. Numeric literals are pure
+// ASCII, so a value containing anything else is left to the expression parser.
+static bool NarrowNumericLiteral(const wstring& val, std::string& out)
+{
+	out.clear();
+	out.reserve(val.size());
+
+	for (wchar_t c : val)
+	{
+		if (c > 0x7F)
+			return false;
+		out.push_back(static_cast<char>(c));
+	}
+
+	return true;
+}
+
 bool ParseFloatValue(const wchar_t* section, const wchar_t* key, const wstring& val, float& out, bool warn = true, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	out = std::wcstof(val.c_str(), &end); // TODO: C++17: use std::from_chars.
-	
-	if (*end == L'\0')
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
 	{
-		if (errno == ERANGE)
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		auto [ptr, ec] = std::from_chars(first, last, out);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Treat floating-point overflow as ±infinity.
-			out = std::signbit(out) ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+			if (ec == std::errc::result_out_of_range)
+			{
+				// from_chars left `out` untouched: overflow -> ±inf, underflow -> ±0.
+				float magnitude = FloatLiteralUnderflows(first, ptr, std::chars_format::general) ? 0.0f : std::numeric_limits<float>::infinity();
+				out = (narrow[0] == '-') ? -magnitude : magnitude;
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToFloat);
@@ -1222,26 +1295,33 @@ inline bool ConvertExpressionToInt(float expr, int& out) noexcept
 
 bool ParseIntValue(const wchar_t* section, const wchar_t* key, const wstring& val, int& out, bool warn = false, const wstring* ini_namespace_override = nullptr)
 {
-	wchar_t* end = nullptr;
-	errno = 0;
-	long long n = std::wcstoll(val.c_str(), &end, 10); // TODO: C++17: use std::from_chars
-	
-	if (*end == L'\0') {
-		if (errno == ERANGE)
+	std::string narrow;
+
+	if (NarrowNumericLiteral(val, narrow))
+	{
+		const char* first = narrow.data();
+		const char* last = first + narrow.size();
+		long long n = 0;
+		auto [ptr, ec] = std::from_chars(first, last, n, 10);
+
+		if (ptr == last && ec != std::errc::invalid_argument)
 		{
-			// Saturate integer literal overflow.
-			out = (n < 0) ? INT_MIN : INT_MAX;
-		}
-		else
-		{
-			if (n < INT_MIN)
-				out = INT_MIN;
-			else if (n > INT_MAX)
-				out = INT_MAX;
+			if (ec == std::errc::result_out_of_range)
+			{
+				// Saturate integer literal overflow.
+				out = (narrow[0] == '-') ? INT_MIN : INT_MAX;
+			}
 			else
-				out = static_cast<int>(n);
+			{
+				if (n < INT_MIN)
+					out = INT_MIN;
+				else if (n > INT_MAX)
+					out = INT_MAX;
+				else
+					out = static_cast<int>(n);
+			}
+			return true;
 		}
-		return true;
 	}
 
 	return ParseIniExpression(ini_namespace_override, section, key, val, out, warn, ConvertExpressionToInt);
@@ -2103,7 +2183,6 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 	custom_resource->override_msaa_quality = GetIniInt(section_name, L"msaa_quality", -1, NULL);
 	custom_resource->override_byte_width = GetIniInt(section_name, L"byte_width", -1, NULL);
 	custom_resource->override_stride = GetIniInt(section_name, L"stride", -1, NULL);
-	custom_resource->uav_counter = (UINT)GetIniInt(section_name, L"uav_counter", -1, NULL);
 
 	custom_resource->width_multiply = GetIniFloat(section_name, L"width_multiply", 1.0f, NULL);
 	custom_resource->height_multiply = GetIniFloat(section_name, L"height_multiply", 1.0f, NULL);
@@ -2176,6 +2255,77 @@ static CustomResourcePool* ParseResourcePoolSection(const wchar_t* section_name)
 	pool->Initialize(pool_size);
 
 	return pool;
+}
+
+// An ini value the audio engine would reject is clamped with a warning,
+// not quietly: a sound at a speed nobody asked for is hard to explain.
+static float GetClampedIniFloat(const wchar_t *section, const wchar_t *key,
+		float def, float low, float high)
+{
+	float val = GetIniFloat(section, key, def, NULL);
+
+	if (val < low || val > high) {
+		IniWarningW(L"  %ls must be between %g and %g\n", key, low, high);
+		val = min(max(val, low), high);
+	}
+
+	return val;
+}
+
+// A [Sound*] section names a wav and how an ini wants it played.
+// The file is resolved the same way a [Resource*] filename is:
+// beside the ini that declared it first, then beside the dll.
+static void ParseSoundSection(const wchar_t *section_name)
+{
+	wchar_t setting[MAX_PATH];
+	wchar_t path[MAX_PATH];
+
+	if (!GetIniStringAndLog(section_name, L"filename", 0, setting, MAX_PATH)) {
+		IniWarningW(L"[%ls] has no filename\n", section_name);
+		return;
+	}
+
+	wstring namespace_path;
+	get_namespaced_section_path(section_name, &namespace_path);
+	bool found = false;
+	if (!namespace_path.empty()) {
+		GetModuleFileName(migoto_handle, path, MAX_PATH);
+		wcsrchr(path, L'\\')[1] = 0;
+		wcscat(path, namespace_path.c_str());
+		wcscat(path, setting);
+		if (GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES)
+			found = true;
+	}
+	if (!found) {
+		GetModuleFileName(migoto_handle, path, MAX_PATH);
+		wcsrchr(path, L'\\')[1] = 0;
+		wcscat(path, setting);
+	}
+
+	// volume and speed are both multipliers, speed on the sound's own rate,
+	// so it is a pitch shift as well;
+	// overlap decides whether a play starts a voice of its own,
+	// or restarts the one the section owns:
+	float volume = GetClampedIniFloat(section_name, L"volume", 1.0f, 0.0f, SoundEngine::max_volume);
+	float speed = GetClampedIniFloat(section_name, L"speed", 1.0f,
+			SoundEngine::min_speed, SoundEngine::max_speed);
+	bool loop = GetIniBool(section_name, L"loop", false, NULL);
+	bool overlap = GetIniBool(section_name, L"overlap", false, NULL);
+
+	SoundEngine::Declare(section_name, path, volume, speed, loop, overlap);
+}
+
+static void ParseSoundSections()
+{
+	SoundEngine::forget_sounds();
+
+	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Sound"));
+	IniSections::iterator upper = prefix_upper_bound(ini_sections, wstring(L"Sound"));
+
+	for (IniSections::iterator i = lower; i != upper; i++) {
+		LogInfoW(L"[%s]\n", i->first.c_str());
+		ParseSoundSection(i->first.c_str());
+	}
 }
 
 static void ParseResourceSections()
@@ -2268,9 +2418,6 @@ static bool ParseCommandListLine(const wchar_t *ini_section,
 		CommandList *post_command_list,
 		const wstring *ini_namespace)
 {
-	if (ParseCommandListCompoundAssignment(ini_section, lhs, rhs, raw_line, command_list, pre_command_list, post_command_list, ini_namespace))
-		return true;
-
 	if (ParseCommandListVariableAssignment(ini_section, lhs, rhs, raw_line, command_list, pre_command_list, post_command_list, ini_namespace))
 		return true;
 
@@ -3234,7 +3381,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 	if (G->allow_buffer_resize) 
 	{
 		// Handle buffer resize aka vertex limit raise feature.
-		int override_vertex_count = GetIniInt(id, L"override_vertex_count", -1.0f, &found);
+		int override_vertex_count = GetIniInt(id, L"override_vertex_count", -1, &found);
 		if (override_vertex_count > 0) {
 			// Ensure that stride is specified.
 			int override_byte_stride = GetIniInt(id, L"override_byte_stride", -1, NULL);
@@ -3246,7 +3393,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 			override->override_byte_width = override_byte_stride * override_vertex_count;
 
 			// Handle UAV resize
-			int uav_byte_stride = GetIniInt(id, L"uav_byte_stride", -1.0f, &found);
+			int uav_byte_stride = GetIniInt(id, L"uav_byte_stride", -1, &found);
 			if (uav_byte_stride > 0) {
 				// Use StructureByteStride override (useful when actual buffer stride is different from the one declared by a game)
 				override->override_num_elements = override_vertex_count * override_byte_stride / uav_byte_stride;
@@ -4937,6 +5084,7 @@ void LoadConfigFile()
 	// Must be done before any command lists that may refer to them:
 	ParseFilterSections();
 	ParseResourceSections();
+	ParseSoundSections();
 
 	// Second pass for the Constants command list:
 	G->constants_command_list.clear();
