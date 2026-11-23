@@ -22,6 +22,7 @@
     <ClCompile Include="ShaderRegex.cpp" />
     <ClCompile Include="HookAddresses.c" />
     <ClCompile Include="HackerDXGI.cpp" />
+    <ClCompile Include="SoundEngine.cpp" />
     <ClCompile Include="..\iid.cpp" />
     <ClCompile Include="..\util.cpp" />
     <ClCompile Include="profiling.cpp" />
@@ -60,6 +61,7 @@
     <ClInclude Include="..\shader.h" />
     <ClInclude Include="ShaderRegex.h" />
     <ClInclude Include="FrameAnalysis.h" />
+    <ClInclude Include="SoundEngine.h" />
     <ClInclude Include="HackerDXGI.h" />
     <ClInclude Include="profiling.h" />
     <ClInclude Include="lock.h" />
