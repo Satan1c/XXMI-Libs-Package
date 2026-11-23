@@ -92,6 +92,16 @@ HackerContext::HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pCon
 	mCurrentInputLayout = nullptr;
 	mOriginalInputLayout = nullptr;
 	mOverrideInputLayout = nullptr;
+
+	// Initialize DHash only for immediate contexts.
+	// Synchronous GPU readback is not supported on deferred contexts.
+	if (pContext1->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+	{
+		HRESULT hr = mDHasher.Initialize(pDevice1);
+
+		if (FAILED(hr))
+			LogOverlayW(LOG_WARNING, L"Failed to initialize DHash64Gpu: 0x%08X\n", hr);
+	}
 }
 
 HackerContext::~HackerContext()
@@ -538,7 +548,7 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 	HRESULT hr;
 	unsigned i;
 	wstring tagline(L"//");
-	vector<byte> patched_bytecode;
+	vector<byte_t> patched_bytecode;
 	vector<char> asm_vector;
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
@@ -856,6 +866,14 @@ void HackerContext::RestoreInputLayout()
 
 	mOverrideInputLayout = nullptr;
 	mOriginalInputLayout = nullptr;
+}
+
+HRESULT HackerContext::ComputeDHash(ID3D11Texture2D* texture, UINT mipLevel, DXGI_FORMAT srvFormat, uint64_t& outHash)
+{
+	if (!mDHasher.IsInitialized())
+		return E_FAIL;
+
+	return mDHasher.ComputeHash(GetPassThroughOrigContext1(), texture, mipLevel, srvFormat, outHash);
 }
 
 void HackerContext::BeforeDraw(DrawContext &data)
@@ -1332,18 +1350,16 @@ bool HackerContext::MapDenyCPURead(
 	return i->second.begin()->deny_cpu_read;
 }
 
-// Checks resource for being an index or vertex buffer.
+// Check whether this buffer should have its data cached in RAM.
 bool HackerContext::MapTrackRegionHashes(ID3D11Resource* pResource, D3D11_MAP MapType, D3D11_RESOURCE_DIMENSION* dim)
 {
 	if (MapType == D3D11_MAP_READ || *dim != D3D11_RESOURCE_DIMENSION_BUFFER)
 		return false;
-	ID3D11Buffer* buf = (ID3D11Buffer*)pResource;
+
 	D3D11_BUFFER_DESC buf_desc;
-	buf->GetDesc(&buf_desc);
-	if (buf_desc.BindFlags & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER | D3D11_BIND_CONSTANT_BUFFER)) {
-		return true;
-	}
-	return false;
+	((ID3D11Buffer*)pResource)->GetDesc(&buf_desc);
+
+	return (buf_desc.BindFlags & (D3D11_BIND_FLAG)G->cache_resource_data) != 0;
 }
 
 void HackerContext::TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
@@ -1363,6 +1379,7 @@ void HackerContext::TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
 	void *replace = NULL;
 	bool divertable = false, divert = false, track = false;
 	bool write = false, read = false, deny = false;
+	bool track_texture_state = false;
 	Profiling::State profiling_state;
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
@@ -1403,18 +1420,32 @@ void HackerContext::TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
 
 	pResource->GetType(&dim);
 
-	// Divert IB or VB buffer for use in region hashes system cache.
-	// Data will be copied during TrackAndDivertUnmap from allocated replacement.
-	if (G->track_region_hashes) {
-		if (!divert)
-			divert = MapTrackRegionHashes(pResource, MapType, &dim);
+	// Track Texture2D subresource uploads (mips).
+	if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D && write)
+	{
+		D3D11_TEXTURE2D_DESC textureDesc = {};
+		((ID3D11Texture2D*)pResource)->GetDesc(&textureDesc);
+
+		const UINT subresource_count = textureDesc.MipLevels * textureDesc.ArraySize;
+
+		track_texture_state = Subresource < subresource_count;
 	}
 
-	if (!track && !divert)
+	// Divert CB or IB or VB buffer for use in region hashes system cache.
+	// Data will be copied during TrackAndDivertUnmap from allocated replacement.
+	if (!divert && G->cache_resource_data != DataCacheBindFlags::INVALID)
+		divert = MapTrackRegionHashes(pResource, MapType, &dim);
+
+	if (!track && !divert && !track_texture_state)
 		goto out_profile;
 
-	map_info = &mMappedResources[pResource];
+	map_info = &mMappedResources[pResource][Subresource];
+
 	map_info->mapped_writable = write;
+	map_info->subresource = Subresource;
+	map_info->map_type = MapType;
+	map_info->tracks_texture_subresource = track_texture_state;
+
 	memcpy(&map_info->map, pMappedResource, sizeof(D3D11_MAPPED_SUBRESOURCE));
 
 	if (!divertable || !divert)
@@ -1494,31 +1525,32 @@ void UpdateResourceDataCacheFromMap(ID3D11Resource* pResource, void* data, size_
 
 void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresource)
 {
-	MappedResources::iterator i;
-	MappedResourceInfo *map_info = NULL;
 	Profiling::State profiling_state;
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::start(&profiling_state);
 
-	if (mMappedResources.empty())
+	auto resource_it = mMappedResources.find(pResource);
+
+	if (resource_it == mMappedResources.end())
 		goto out_profile;
 
-	i = mMappedResources.find(pResource);
-	if (i == mMappedResources.end())
+	auto subresource_it = resource_it->second.find(Subresource);
+
+	if (subresource_it == resource_it->second.end())
 		goto out_profile;
-	map_info = &i->second;
+
+	MappedResourceInfo* map_info = &subresource_it->second;
 
 	bool deallocate_diverted_memory = true;
 
-	if (G->track_region_hashes && map_info->bind_flags & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER | D3D11_BIND_CONSTANT_BUFFER))
+	if ((map_info->bind_flags & (D3D11_BIND_FLAG)G->cache_resource_data) != 0)
 		UpdateResourceDataCacheFromMap(pResource, map_info->map.pData, map_info->size, &deallocate_diverted_memory);
 
 	if (G->track_texture_updates == 1 && Subresource == 0 && map_info->mapped_writable)
 		UpdateResourceHashFromCPU(pResource, map_info->map.pData, map_info->map.RowPitch, map_info->map.DepthPitch);
 
 	if (map_info->orig_pData) {
-		// TODO: Measure performance vs. not diverting:
 		if (map_info->mapped_writable)
 			memcpy(map_info->orig_pData, map_info->map.pData, map_info->size);
 
@@ -1527,7 +1559,23 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 		}
 	}
 
-	mMappedResources.erase(i);
+	// A writable mapping has now completed.
+	// Treat it as an upload to this subresource.
+	if (map_info->tracks_texture_subresource && map_info->mapped_writable)
+	{
+		const bool discard = map_info->map_type == D3D11_MAP_WRITE_DISCARD;
+
+		// Map doesn't tell us which pixels/bytes were written.
+		const bool full_subresource = true;
+
+		UpdateTextureSubresourceState(pResource, map_info->subresource, full_subresource, discard);
+	}
+
+	// Remove only this mapped subresource.
+	resource_it->second.erase(subresource_it);
+
+	if (resource_it->second.empty())
+		mMappedResources.erase(resource_it);
 
 out_profile:
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
@@ -1943,6 +1991,13 @@ void CopySubresourceRegionCache(ID3D11Resource* pSrcResource, ID3D11Resource* pD
 	if (dim != D3D11_RESOURCE_DIMENSION_BUFFER)
 		return;
 
+	D3D11_BUFFER_DESC dst_desc;
+	((ID3D11Buffer*)pDstResource)->GetDesc(&dst_desc);
+
+	// Cache the destination buffer only if at least one of its bind flags is selected for resource data caching.
+	if ((dst_desc.BindFlags & (D3D11_BIND_FLAG)G->cache_resource_data) == 0)
+		return;
+
 	UINT src_offset = 0;
 	UINT region_size = 0;
 
@@ -1953,39 +2008,34 @@ void CopySubresourceRegionCache(ID3D11Resource* pSrcResource, ID3D11Resource* pD
 		region_size = pSrcBox->right - pSrcBox->left;
 	}
 
-	EnterCriticalSectionPretty(&G->mCriticalSection);
+	{
+		CriticalSectionGuard(&G->mCriticalSection);
 
-	ResourceHandleInfo* src_info = GetResourceHandleInfo(pSrcResource);
-	ResourceHandleInfo* dst_info = GetResourceHandleInfo(pDstResource);
+		ResourceHandleInfo* src_info = GetResourceHandleInfo(pSrcResource);
+		ResourceHandleInfo* dst_info = GetResourceHandleInfo(pDstResource);
 
-	if (!src_info || !dst_info) {
-		LeaveCriticalSection(&G->mCriticalSection);
-		return;
+		if (!src_info || !dst_info) {
+			return;
+		}
+
+		if (!src_info->cached_data_size || src_offset + region_size > src_info->cached_data_size) {
+			// Copy is happening from uncached data -> reset dst cache and leave it to slow fallback path.
+			dst_info->ClearDataCache();
+			return;
+		}
+
+		// If range is not specified, we must copy the entire src buffer.
+		if (!region_size)
+			region_size = src_info->cached_data_size;
+
+		// Initialize new cache of dst size.
+		if (!dst_info->cached_data_size)
+			dst_info->InitializeDataCache(dst_desc.ByteWidth);
+
+		dst_info->SetDataCacheRegion(src_info->GetCachedData() + src_offset, region_size, DstX);
+
+		//dst_info->cached_data_hash = crc32c_hw(0, dst_info->cached_data, dst_desc.ByteWidth);
 	}
-
-	if (!src_info->cached_data_size || src_offset + region_size > src_info->cached_data_size) {
-		// Copy is happening from uncached data -> reset dst cache and leave it to slow fallback path.
-		dst_info->ClearDataCache();
-		LeaveCriticalSection(&G->mCriticalSection);
-		return;
-	}
-
-	// If range is not specified, we must copy the entire src buffer.
-	if (!region_size)
-		region_size = src_info->cached_data_size;
-
-	// Initialize new cache of dst size.
-	if (!dst_info->cached_data_size) {
-		D3D11_BUFFER_DESC dst_desc;
-		((ID3D11Buffer*)pDstResource)->GetDesc(&dst_desc);
-		dst_info->InitializeDataCache(dst_desc.ByteWidth);
-	}
-
-	dst_info->SetDataCacheRegion(src_info->GetCachedData() + src_offset, region_size, DstX);
-
-	//dst_info->cached_data_hash = crc32c_hw(0, dst_info->cached_data, dst_desc.ByteWidth);
-
-	LeaveCriticalSection(&G->mCriticalSection);
 
 	//LogInfo("CopySubresourceRegion CacheBufferData region_size=%d, src_offset=%d, dst_offset=%d, src_hash=%08lx, src_data_hash=%08lx, dst_hash=%08lx, dst_data_hash=%08lx, srcResource=0x%p, dstResource=0x%p\n",
 	//	region_size, src_offset, DstX, src_info->hash, src_info->cached_data_hash, dst_info->hash, dst_info->cached_data_hash, pSrcResource, pDstResource);
@@ -2022,6 +2072,9 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	 mOrigContext1->CopySubresourceRegion(pDstResource, DstSubresource, replaceDstX, DstY, DstZ,
 		pSrcResource, SrcSubresource, pSrcBox);
 
+	 // Track actual destination subresource modifications.
+	 UpdateTextureSubresourceStateFromCopy(pDstResource, DstSubresource, replaceDstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox);
+
 	// We only update the destination resource hash when the entire
 	// subresource 0 is updated and pSrcBox is NULL. We could check if the
 	// pSrcBox fills the entire resource, but if the game is using pSrcBox
@@ -2031,7 +2084,7 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	if (G->track_texture_updates == 1 && DstSubresource == 0 && DstX == 0 && DstY == 0 && DstZ == 0 && pSrcBox == NULL)
 		PropagateResourceHash(pDstResource, pSrcResource);
 
-	if (G->track_region_hashes)
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		CopySubresourceRegionCache(pSrcResource, pDstResource, DstX, pSrcBox);
 }
 
@@ -2045,9 +2098,8 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 		MarkResourceHashContaminated(pDstResource, 0, pSrcResource, 0, 'C', 0, 0, 0, NULL);
 	}
 
-	if (G->track_region_hashes) {
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
-	}
 
 	TextureOverrideMatches matches;
 	find_texture_overrides_for_resource(pDstResource, &matches, NULL);
@@ -2086,8 +2138,16 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 	
 	mOrigContext1->CopyResource(pDstResource, pSrcResource);
 
+	// Propagate subresource initialization state.
+	UpdateTextureResourceStateFromCopy(pDstResource, pSrcResource);
+
 	if (G->track_texture_updates == 1)
 		PropagateResourceHash(pDstResource, pSrcResource);
+}
+
+static bool IsEmptyDstBox(const D3D11_BOX* box)
+{
+	return box && (box->left >= box->right || box->top >= box->bottom || box->front >= box->back);
 }
 
 STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
@@ -2108,12 +2168,15 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 		MarkResourceHashContaminated(pDstResource, DstSubresource, NULL, 0, 'U', 0, 0, 0, NULL);
 	}
 
-	if (G->track_region_hashes) {
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
-	}
 
 	 mOrigContext1->UpdateSubresource(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch,
 		SrcDepthPitch);
+
+	 // Handle full subresource upload.
+	 if (pSrcData && !IsEmptyDstBox(pDstBox))
+		 UpdateTextureSubresourceState(pDstResource, DstSubresource, pDstBox == nullptr, false);
 
 	// We only update the destination resource hash when the entire
 	// subresource 0 is updated and pDstBox is NULL. We could check if the
@@ -2178,6 +2241,7 @@ STDMETHODIMP_(void) HackerContext::GenerateMips(THIS_
 	__in  ID3D11ShaderResourceView *pShaderResourceView)
 {
 	 mOrigContext1->GenerateMips(pShaderResourceView);
+	 UpdateTextureGenerateMipsState(pShaderResourceView);
 }
 
 STDMETHODIMP_(void) HackerContext::SetResourceMinLOD(THIS_
@@ -2211,6 +2275,8 @@ STDMETHODIMP_(void) HackerContext::ResolveSubresource(THIS_
 {
 	 mOrigContext1->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource,
 		Format);
+
+	 UpdateTextureSubresourceStateFromResolve(pDstResource, DstSubresource, pSrcResource, SrcSubresource);
 }
 
 STDMETHODIMP_(void) HackerContext::ExecuteCommandList(THIS_
@@ -3429,10 +3495,12 @@ void STDMETHODCALLTYPE HackerContext::CopySubresourceRegion1(
 	/* [annotation] */
 	_In_  UINT CopyFlags)
 {
-	if (G->track_region_hashes) {
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
-	}
+
 	mOrigContext1->CopySubresourceRegion1(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
+	
+	UpdateTextureSubresourceStateFromCopy(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
 }
 
 void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
@@ -3451,13 +3519,18 @@ void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
 	/* [annotation] */
 	_In_  UINT CopyFlags)
 {
-	if (G->track_region_hashes) {
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
-	}
 
 	mOrigContext1->UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, CopyFlags);
 
 	// TODO: Track resource hash updates
+
+	if (pSrcData && !IsEmptyDstBox(pDstBox))
+	{
+		const bool discard = (CopyFlags & D3D11_COPY_DISCARD) != 0;
+		UpdateTextureSubresourceState(pDstResource, DstSubresource, pDstBox == nullptr, discard);
+	}
 }
 
 
@@ -3465,9 +3538,9 @@ void STDMETHODCALLTYPE HackerContext::DiscardResource(
 	/* [annotation] */
 	_In_  ID3D11Resource *pResource)
 {
-	if (G->track_region_hashes) {
+	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pResource);
-	}
+
 	mOrigContext1->DiscardResource(pResource);
 }
 
