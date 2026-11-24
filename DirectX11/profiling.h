@@ -96,6 +96,10 @@ namespace Profiling {
 	extern unsigned msaa_resolutions;
 	extern unsigned buffer_region_copies;
 	extern unsigned views_cleared;
+	extern unsigned shader_resource_bind_calls;
+	extern unsigned shader_resource_slots_bound;
+	extern unsigned constant_buffer_bind_calls;
+	extern unsigned constant_buffer_slots_bound;
 	extern unsigned resources_created;
 	extern unsigned resource_pool_swaps;
 	extern unsigned max_copies_per_frame_exceeded;

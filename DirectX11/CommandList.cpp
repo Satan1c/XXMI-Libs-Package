@@ -10742,7 +10742,11 @@ static void SetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shade
 		case L'g': context->GSSetConstantBuffers(first, count, buffers); break;
 		case L'p': context->PSSetConstantBuffers(first, count, buffers); break;
 		case L'c': context->CSSetConstantBuffers(first, count, buffers); break;
+		default: return;
 	}
+
+	Profiling::constant_buffer_bind_calls++;
+	Profiling::constant_buffer_slots_bound += count;
 }
 
 // Binds a window of each buffer rather than all of it, in constants of 16 bytes.
@@ -10758,7 +10762,11 @@ static void SetConstantBufferRegionsBatch(ID3D11DeviceContext1 *context, wchar_t
 		case L'g': context->GSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
 		case L'p': context->PSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
 		case L'c': context->CSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		default: return;
 	}
+
+	Profiling::constant_buffer_bind_calls++;
+	Profiling::constant_buffer_slots_bound += count;
 }
 
 static void GetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView **views)
@@ -10782,7 +10790,11 @@ static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shade
 		case L'g': context->GSSetShaderResources(first, count, views); break;
 		case L'p': context->PSSetShaderResources(first, count, views); break;
 		case L'c': context->CSSetShaderResources(first, count, views); break;
+		default: return;
 	}
+
+	Profiling::shader_resource_bind_calls++;
+	Profiling::shader_resource_slots_bound += count;
 }
 
 // Only the pixel and compute stages have UAV slots,

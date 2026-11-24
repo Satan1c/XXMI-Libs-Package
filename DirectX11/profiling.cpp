@@ -42,6 +42,10 @@ namespace Profiling {
 	unsigned msaa_resolutions;
 	unsigned buffer_region_copies;
 	unsigned views_cleared;
+	unsigned shader_resource_bind_calls;
+	unsigned shader_resource_slots_bound;
+	unsigned constant_buffer_bind_calls;
+	unsigned constant_buffer_slots_bound;
 	unsigned resources_created;
 	unsigned resource_pool_swaps;
 	unsigned max_copies_per_frame_exceeded;
@@ -317,6 +321,17 @@ static void update_txt_summary(LARGE_INTEGER collection_duration, LARGE_INTEGER 
 	);
 	Profiling::text += buf;
 
+	_snwprintf_s(buf, ARRAYSIZE(buf), _TRUNCATE,
+			    L"       Shader resource bind calls: %4u/frame (%u slots/frame)\n"
+			    L"       Constant buffer bind calls: %4u/frame (%u slots/frame)\n"
+			    ,
+			    Profiling::shader_resource_bind_calls / frames,
+			    Profiling::shader_resource_slots_bound / frames,
+			    Profiling::constant_buffer_bind_calls / frames,
+			    Profiling::constant_buffer_slots_bound / frames
+	);
+	Profiling::text += buf;
+
 	if (G->implicit_post_checktextureoverride_used && !Profiling::cto_warning.empty())
 		Profiling::text += L"\nImplicit post checktextureoverrides were not optimised out\n";
 }
@@ -487,6 +502,10 @@ void Profiling::clear()
 	msaa_resolutions = 0;
 	buffer_region_copies = 0;
 	views_cleared = 0;
+	shader_resource_bind_calls = 0;
+	shader_resource_slots_bound = 0;
+	constant_buffer_bind_calls = 0;
+	constant_buffer_slots_bound = 0;
 	resources_created = 0;
 	resource_pool_swaps = 0;
 	max_copies_per_frame_exceeded = 0;
