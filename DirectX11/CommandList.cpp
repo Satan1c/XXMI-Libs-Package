@@ -178,6 +178,30 @@ struct InvalidateResolvedAround {
 	~InvalidateResolvedAround() { invalidate_resolved_resources(state); }
 };
 
+static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView *const *views);
+static void SetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11Buffer *const *buffers);
+static void SetConstantBufferRegionsBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11Buffer *const *buffers, const UINT *cb_first, const UINT *cb_counts);
+
+// Some expressions are evaluated with no state at all.
+static bool has_pending_binds(CommandListState *state)
+{
+	return state && state->mHackerContext && !state->mHackerContext->mPendingBinds.Empty();
+}
+
+// Makes the shader resource and constant buffer binds this run has recorded but not yet sent.
+// Called before anything that reads or writes a t or cb slot of the real pipeline,
+// and drops the resolves like any other bind does:
+// D3D11 unbinds the view of a resource that is also bound as an output.
+static void flush_pending_binds(CommandListState *state)
+{
+	if (!has_pending_binds(state))
+		return;
+
+	state->mHackerContext->mPendingBinds.Flush(state->mOrigContext1, SetShaderResourcesBatch, SetConstantBuffersBatch, SetConstantBufferRegionsBatch);
+	invalidate_resolved_resources(state);
+}
+
 static void _RunCommandList(CommandList *command_list, CommandListState *state, bool recursive=true)
 {
 	CommandList::Commands::iterator i;
@@ -201,6 +225,9 @@ static void _RunCommandList(CommandList *command_list, CommandListState *state, 
 	profile_command_list_start(command_list, state, &profiling_state);
 
 	for (i = command_list->commands.begin(); i < command_list->commands.end() && !state->aborted; i++) {
+		if (has_pending_binds(state) && !(*i)->keeps_pending_binds())
+			flush_pending_binds(state);
+
 		profile_command_list_cmd_start(i->get(), &profiling_state);
 		(*i)->run(state);
 		profile_command_list_cmd_end(i->get(), state, &profiling_state);
@@ -497,6 +524,10 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 		UpdateInputLayout(command_list->ini_section.c_str(), &state);
 
 	_RunCommandList(command_list, &state);
+
+	// An aborted list and the recursion limit leave binds pending as well:
+	// nothing outside a run may find one.
+	flush_pending_binds(&state);
 	CommandListFlushState(&state);
 }
 
@@ -3070,6 +3101,9 @@ void RunCustomShaderCommand::run(CommandListState *state)
 	state->post = true;
 	_RunCommandList(&custom_shader->post_command_list, state);
 	state->post = saved_post;
+
+	// Binds recorded by the lists go out while the custom shader is still bound, as they would have been made:
+	flush_pending_binds(state);
 
 	// Finally restore the original shaders
 	if (custom_shader->vs_override)
@@ -9722,6 +9756,9 @@ void InitialTexturesSnapshot::SnapshotInitialTextures(CommandListState* state)
 
 		const UINT count = slot - first;
 
+		// The snapshot is of what is really bound:
+		flush_pending_binds(state);
+
 		// PSGetShaderResources AddRefs each returned non-null view.
 		// These references are retained by the cache until next SnapshotInitialTextures or Clear.
 		state->mOrigContext1->PSGetShaderResources(first, count, initial_textures.data() + first);
@@ -9817,6 +9854,9 @@ void RestoreInitialTexturesOperation::run(CommandListState* state)
 // Returns the smallest valid distance, or 65 if no comparison succeeds.
 unsigned FindBestMatchingTextureDistance(CommandListState* state, ResourceFilter* slot_filter, std::array<uint8_t, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>& distances)
 {
+	// GetDhash hashes through cs-t0:
+	flush_pending_binds(state);
+
 	// Initialize every slot as having no valid comparison.
 	// This also excludes undeclared slots and slots without initial SRVs.
 	distances.fill(65);
@@ -10966,7 +11006,11 @@ static void SetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shade
 		case L'g': context->GSSetConstantBuffers(first, count, buffers); break;
 		case L'p': context->PSSetConstantBuffers(first, count, buffers); break;
 		case L'c': context->CSSetConstantBuffers(first, count, buffers); break;
+		default: return;
 	}
+
+	Profiling::constant_buffer_bind_calls++;
+	Profiling::constant_buffer_slots_bound += count;
 }
 
 // Binds a window of each buffer rather than all of it, in constants of 16 bytes.
@@ -10982,7 +11026,11 @@ static void SetConstantBufferRegionsBatch(ID3D11DeviceContext1 *context, wchar_t
 		case L'g': context->GSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
 		case L'p': context->PSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
 		case L'c': context->CSSetConstantBuffers1(first, count, buffers, cb_first, cb_counts); break;
+		default: return;
 	}
+
+	Profiling::constant_buffer_bind_calls++;
+	Profiling::constant_buffer_slots_bound += count;
 }
 
 static void GetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView **views)
@@ -11006,7 +11054,11 @@ static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shade
 		case L'g': context->GSSetShaderResources(first, count, views); break;
 		case L'p': context->PSSetShaderResources(first, count, views); break;
 		case L'c': context->CSSetShaderResources(first, count, views); break;
+		default: return;
 	}
+
+	Profiling::shader_resource_bind_calls++;
+	Profiling::shader_resource_slots_bound += count;
 }
 
 // Only the pixel and compute stages have UAV slots,
@@ -11131,6 +11183,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, Resourc
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 	{
+		flush_pending_binds(state);
 		GetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf, &info->offset, &info->size);
 
 		// Derive data offset in bytes from FirstConstant, where each constant is 16 bytes long (4 * 32-bit components).
@@ -11144,6 +11197,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, Resourc
 		return buf;
 	}
 	case ResourceCopyTargetType::SHADER_RESOURCE:
+		flush_pending_binds(state);
 		GetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
 		return resource_from_view(resource_view, info);
 
@@ -11390,6 +11444,9 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		if (!binding.size) {
 			if (binding.offset > 0)
 				LogOverlayW(LOG_DIRE, L"BUG: SetResource called with offset=%d but buf_size=0 for CONSTANT_BUFFER, falling back to plugging the entire buffer\n", binding.offset);
+			if (state->mHackerContext->mPendingBinds.RecordConstantBuffer(shader_type, slot, buf, false, 0, 0))
+				return;
+			flush_pending_binds(state);
 			SetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf);
 			return;
 		}
@@ -11401,11 +11458,17 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
 		cb_count = binding.size / 16;
 
+		if (state->mHackerContext->mPendingBinds.RecordConstantBuffer(shader_type, slot, buf, true, cb_first, cb_count))
+			return;
+		flush_pending_binds(state);
 		SetConstantBufferRegionsBatch(mOrigContext1, shader_type, slot, 1, &buf, &cb_first, &cb_count);
 		return;
 
 	case ResourceCopyTargetType::SHADER_RESOURCE:
 		resource_view = (ID3D11ShaderResourceView*)binding.view;
+		if (state->mHackerContext->mPendingBinds.RecordShaderResource(shader_type, slot, resource_view))
+			break;
+		flush_pending_binds(state);
 		SetShaderResourcesBatch(mOrigContext1, shader_type, slot, 1, &resource_view);
 		break;
 
@@ -11424,20 +11487,25 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		mOrigContext1->IASetIndexBuffer(buf, binding.format, binding.offset);
 		break;
 
+	// D3D11 unbinds the views of a resource that becomes an output, so the recorded ones have to be bound first:
 	case ResourceCopyTargetType::STREAM_OUTPUT:
+		flush_pending_binds(state);
 		set_stream_output_slot(mOrigContext1, slot, (ID3D11Buffer*)binding.resource, binding.offset);
 		break;
 
 	case ResourceCopyTargetType::RENDER_TARGET:
+		flush_pending_binds(state);
 		set_render_target_slot(mOrigContext1, slot, (ID3D11RenderTargetView*)binding.view);
 		break;
 
 	case ResourceCopyTargetType::DEPTH_STENCIL_TARGET:
+		flush_pending_binds(state);
 		set_depth_target(mOrigContext1, (ID3D11DepthStencilView*)binding.view);
 		break;
 
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		// XXX: HERE BE UNTESTED CODE PATHS!
+		flush_pending_binds(state);
 		unordered_view = (ID3D11UnorderedAccessView*)binding.view;
 		SetUnorderedAccessViewsBatch(mOrigContext1, shader_type, slot, 1, &unordered_view, &uav_counter);
 		break;
@@ -11848,6 +11916,20 @@ ResolvedResourceScope::~ResolvedResourceScope()
 	owner->resolved_count = 0;
 }
 
+// Whether resolving the target, or reading a property off it, can flush the pending binds:
+// a t or cb slot is read from the pipeline, and an argument such as the offset of HashRegion is an expression that may read one.
+static bool resolve_may_flush(const ResourceCopyTarget &target)
+{
+	switch (target.type) {
+		case ResourceCopyTargetType::SHADER_RESOURCE:
+		case ResourceCopyTargetType::CONSTANT_BUFFER:
+		case ResourceCopyTargetType::THIS_RESOURCE:
+			return true;
+	}
+
+	return target.member_args[0].type != MemberArg::Type::None;
+}
+
 // Resolves the target for a property read or a filter index comparison.
 // A resolve of the same resource made earlier in this run is handed back instead,
 // and a new one is kept for the rest of the run.
@@ -11857,6 +11939,12 @@ ResolvedResource *ResourceCopyTarget::ResolveForProperty(CommandListState *state
 	ResolvedResource *entry = local;
 	CustomResource *custom_resource = NULL;
 	bool custom = type == ResourceCopyTargetType::CUSTOM_RESOURCE;
+
+	// Before the entry below is taken, never inside GetResource() or while it is in use:
+	// a flush empties the cache, which would release the entry under whoever holds it.
+	// The pipeline cannot be bound to again until this read is over, since expressions do not bind:
+	if (resolve_may_flush(*this))
+		flush_pending_binds(state);
 
 	// Resolved here rather than inside GetResource(),
 	// so that a dynamic pool index is evaluated once and its element can go in the key:
@@ -12088,6 +12176,10 @@ float ResourceCopyTarget::GetResourceHammingDistance(CommandListState* state)
 
 	uint64_t resource_dhash = 0;
 	bool has_resource_dhash = false;
+
+	// GetDhash() binds cs-t0.
+	// Flushed before the resolve, as a flush drops cached resolves:
+	flush_pending_binds(state);
 
 	ResourceCopyInfo info;
 	ID3D11Resource* resource = GetResource(state, &info);
@@ -13986,6 +14078,25 @@ void ResourceCopyOperation::RunWithSource(CommandListState *state, ID3D11Resourc
 	CopyResourceToResource(state, ResourceCopyInfo(src_resource, src_view));
 }
 
+// Only the destinations that merely record a binding or fill a resource can leave the binds pending.
+// Any other one may bind an output over a resource a pending view reads, or change the viewport.
+bool ResourceCopyOperation::keeps_pending_binds()
+{
+	if (options & ResourceCopyOptions::SET_VIEWPORT)
+		return false;
+
+	switch (dst.type) {
+		case ResourceCopyTargetType::SHADER_RESOURCE:
+		case ResourceCopyTargetType::CONSTANT_BUFFER:
+		case ResourceCopyTargetType::CUSTOM_RESOURCE:
+		case ResourceCopyTargetType::VERTEX_BUFFER:
+		case ResourceCopyTargetType::INDEX_BUFFER:
+			return true;
+	}
+
+	return false;
+}
+
 void ResourceCopyOperation::run(CommandListState *state)
 {
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
@@ -14027,14 +14138,28 @@ void ResourceCopyOperation::CopyResolvedSource(CommandListState *state, Resource
 
 #pragma region ShaderResourceBatches
 
+// Takes over the references a deferred binding holds.
+// A slot the pending binds cannot hold goes out at once, after the ones recorded before it.
+static void record_deferred_bind(CommandListState *state, const ResourceCopyTarget &target, DeferredBinding &binding)
+{
+	ID3D11ShaderResourceView *view = (ID3D11ShaderResourceView*)binding.view;
+
+	// Only the view is bound to a t slot:
+	if (binding.resource)
+		binding.resource->Release();
+
+	if (!state->mHackerContext->mPendingBinds.RecordShaderResource(target.shader_type, target.slot, view)) {
+		flush_pending_binds(state);
+		SetShaderResourcesBatch(state->mOrigContext1, target.shader_type, target.slot, 1, &view);
+	}
+
+	if (view)
+		view->Release();
+}
+
 void ShaderResourceBindBatch::run(CommandListState *state)
 {
-	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
-
 	COMMAND_LIST_LOG(state, "batched %lcs-t%u..%u {\n", shader_type, first_slot, first_slot + count - 1);
-
-	if (prefetch_current_bindings)
-		GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
 	for (auto &op : operations) {
 		DeferredBinding binding;
@@ -14046,29 +14171,25 @@ void ShaderResourceBindBatch::run(CommandListState *state)
 		if (!binding.assigned)
 			continue; // unless_null with a null source keeps the current binding
 
-		// Only the view is bound to a t slot:
-		if (binding.resource)
-			binding.resource->Release();
-
 		// Through BatchTarget(), not dst:
 		// a folded if/elif/else chain leaves its own dst unset,
-		// and the slot it drives is its branches'.
-		// Reading dst here would index from slot 0:
-		unsigned i = op->BatchTarget(BatchDirection::Bind).slot - first_slot;
-		if (views[i])
-			views[i]->Release();
-		views[i] = (ID3D11ShaderResourceView*)binding.view;
+		// and the slot it drives is its branches':
+		record_deferred_bind(state, op->BatchTarget(BatchDirection::Bind), binding);
 	}
 
-	SetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 	invalidate_resolved_resources(state);
 
-	for (unsigned i = 0; i < count; i++) {
-		if (views[i])
-			views[i]->Release();
+	COMMAND_LIST_LOG(state, "%s\n", "}");
+}
+
+bool ShaderResourceBindBatch::keeps_pending_binds()
+{
+	for (auto &op : operations) {
+		if (!op->keeps_pending_binds())
+			return false;
 	}
 
-	COMMAND_LIST_LOG(state, "%s\n", "}");
+	return true;
 }
 
 void ShaderResourceFetchBatch::run(CommandListState *state)
@@ -14077,6 +14198,7 @@ void ShaderResourceFetchBatch::run(CommandListState *state)
 
 	COMMAND_LIST_LOG(state, "batched %lcs-t%u..%u {\n", shader_type, first_slot, first_slot + count - 1);
 
+	flush_pending_binds(state);
 	GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
 
 	for (auto &op : operations) {
@@ -14157,6 +14279,16 @@ static bool same_batch_target(const ResourceCopyOperation *op, const ResourceCop
 const ResourceCopyTarget& ConditionalSlotCopyOperation::BatchTarget(BatchDirection direction) const
 {
 	return branches[0].op->BatchTarget(direction);
+}
+
+bool ConditionalSlotCopyOperation::keeps_pending_binds()
+{
+	for (auto &branch : branches) {
+		if (branch.op && !branch.op->keeps_pending_binds())
+			return false;
+	}
+
+	return true;
 }
 
 ConditionalSlotBranch* ConditionalSlotCopyOperation::MatchingBranch(CommandListState *state)
@@ -14338,7 +14470,7 @@ static std::shared_ptr<CommandListCommand> unbatched(const std::shared_ptr<Resou
 // bind / fetch batch and appends it to out. A range holding a single
 // operation is not worth a batch, that operation is appended as is.
 static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run, BatchDirection direction,
-	unsigned first, unsigned last, bool prefetch_current_bindings, CommandList::Commands &out)
+	unsigned first, unsigned last, CommandList::Commands &out)
 {
 	std::shared_ptr<ShaderResourceBatch> batch;
 	if (direction == BatchDirection::Bind)
@@ -14362,7 +14494,6 @@ static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperat
 	batch->shader_type = run[0]->BatchTarget(direction).shader_type;
 	batch->first_slot = first;
 	batch->count = last - first + 1;
-	batch->prefetch_current_bindings = prefetch_current_bindings;
 	// Shown in the frame analysis log in place of the individual lines:
 	batch->ini_line = batch->operations[0]->ini_line + L" ... +" + std::to_wstring(batch->operations.size() - 1);
 	out.push_back(batch);
@@ -14376,39 +14507,37 @@ static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperat
 // split wherever the (sorted, unique) slot numbers have a gap, and each
 // contiguous range becomes its own batch.
 //
-// unless_null changes that for binds. A slot whose source turned out to be
-// null has to keep its current view, and the only way to know that view is
-// to XXGetShaderResources the range up front (prefetch_current_bindings).
-// Since the current bindings are read anyway, gaps cost nothing extra: the
-// gap slots are simply written back with the view they already had, and the
-// whole run becomes one batch spanning from the lowest to the highest slot.
+// unless_null changes that for binds:
+// the whole run becomes one batch spanning from the lowest to the highest slot,
+// as a bind is only recorded for the slots whose source was not null,
+// and the gaps between them are never written.
 static void emit_slot_batches(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run,
 	BatchDirection direction, CommandList::Commands &out)
 {
-	bool prefetch_current_bindings = false;
+	bool span_gaps = false;
 	std::vector<unsigned> slots;
 
 	for (auto &op : run) {
 		slots.push_back(op->BatchTarget(direction).slot);
 		if (direction == BatchDirection::Bind && (op->options & ResourceCopyOptions::UNLESS_NULL))
-			prefetch_current_bindings = true;
+			span_gaps = true;
 	}
 	std::sort(slots.begin(), slots.end());
 	slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
 
-	if (prefetch_current_bindings) {
-		emit_slot_batch(run, direction, slots.front(), slots.back(), true, out);
+	if (span_gaps) {
+		emit_slot_batch(run, direction, slots.front(), slots.back(), out);
 		return;
 	}
 
 	unsigned first = slots[0];
 	for (size_t i = 1; i < slots.size(); i++) {
 		if (slots[i] != slots[i - 1] + 1) {
-			emit_slot_batch(run, direction, first, slots[i - 1], false, out);
+			emit_slot_batch(run, direction, first, slots[i - 1], out);
 			first = slots[i];
 		}
 	}
-	emit_slot_batch(run, direction, first, slots.back(), false, out);
+	emit_slot_batch(run, direction, first, slots.back(), out);
 }
 
 // Optimiser pass: walks the command list once and replaces every run of two
@@ -14575,12 +14704,14 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 
 	switch (target.type) {
 	case ResourceCopyTargetType::SHADER_RESOURCE:
+		flush_pending_binds(state);
 		GetShaderResourcesBatch(context, target.shader_type, first, count, (ID3D11ShaderResourceView**)bindings.views);
 		break;
 	case ResourceCopyTargetType::UNORDERED_ACCESS_VIEW:
 		GetUnorderedAccessViewsBatch(context, target.shader_type, first, count, (ID3D11UnorderedAccessView**)bindings.views);
 		break;
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
+		flush_pending_binds(state);
 		GetConstantBuffersBatch(context, target.shader_type, first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes);
 		// Same unit conversion as GetResource(): constants -> bytes
 		for (unsigned i = 0; i < count; i++) {
@@ -14594,6 +14725,9 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 static void SetSlotRange(CommandListState *state, ResourceCopyTarget &target, unsigned first, unsigned count, const SlotRangeBindings &bindings)
 {
 	ID3D11DeviceContext1 *context = state->mOrigContext1;
+
+	// An older pending bind must not be made after this one, over what it binds:
+	flush_pending_binds(state);
 
 	// As in SetResource(): a resolve describes what was bound before this.
 	invalidate_resolved_resources(state);

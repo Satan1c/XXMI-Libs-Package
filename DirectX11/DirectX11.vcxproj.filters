@@ -30,6 +30,7 @@
     <ClCompile Include="lock.cpp" />
     <ClCompile Include="cursor.cpp" />
     <ClCompile Include="Override.cpp" />
+    <ClCompile Include="PendingBinds.cpp" />
     <ClCompile Include="HackerInputLayout.cpp" />
     <ClCompile Include="ByteCodeReader.cpp" />
     <ClCompile Include="DHash64Gpu.cpp" />
@@ -67,6 +68,7 @@
     <ClInclude Include="lock.h" />
     <ClInclude Include="cursor.h" />
     <ClInclude Include="Override.h" />
+    <ClInclude Include="PendingBinds.h" />
     <ClInclude Include="HackerInputLayout.h" />
     <ClInclude Include="d3d11TokenizedProgramFormat.hpp" />
     <ClInclude Include="ByteCodeReader.h" />

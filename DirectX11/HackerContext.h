@@ -11,6 +11,7 @@
 #include "HackerDevice.h"
 #include "Globals.h"
 #include "DHash64Gpu.h"
+#include "PendingBinds.h"
 
 // {A3046B1E-336B-4D90-9FD6-234BC09B8687}
 DEFINE_GUID(IID_HackerContext,
@@ -271,6 +272,9 @@ public:
 	void RestoreInputLayout();
 
 	InitialTexturesSnapshot& GetInitialTexturesSnapshot() { return mInitialTexturesSnapshot; }
+
+	// public to allow CommandList access
+	PendingBinds mPendingBinds;
 
 	HRESULT ComputeDHash(ID3D11Texture2D* texture, UINT mipLevel, DXGI_FORMAT srvFormat, uint64_t& outHash);
 
