@@ -121,6 +121,13 @@ public:
 	virtual void run(CommandListState*) = 0;
 	virtual bool optimise(HackerDevice *device) { return false; }
 	virtual bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) { return false; }
+
+	// Whether this can run while shader resource binds are pending (see PendingBinds).
+	// Only true for a command that neither depends on nor changes the real bindings,
+	// except through the points that flush for themselves,
+	// such as ResourceCopyTarget::GetResource() and SetResource().
+	// Anything else has them flushed before it runs:
+	virtual bool keeps_pending_binds() { return false; }
 };
 
 enum class VariableFlags {
@@ -264,6 +271,8 @@ public:
 	{}
 
 	void run(CommandListState*) override;
+	// Only triggers an override that is applied later, on present:
+	bool keeps_pending_binds() override { return true; }
 };
 
 class ExplicitCommandListSection
@@ -288,6 +297,7 @@ public:
 
 	void run(CommandListState*) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 // XXX: If this is ever used for a purpose other than ShaderRegex in the future
@@ -303,6 +313,7 @@ public:
 
 	void run(CommandListState*) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/gg615083(v=vs.85).aspx
@@ -443,6 +454,7 @@ public:
 	{}
 
 	void run(CommandListState*) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 // Handling=abort aborts the current command list, and any command lists that
@@ -457,6 +469,7 @@ public:
 	{}
 
 	void run(CommandListState*) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 
@@ -1504,6 +1517,9 @@ public:
 	void CopyResolvedSource(CommandListState* state, ResourceCopyInfo& src_info);
 
 	void run(CommandListState*) override;
+	// Any option that affects pipeline state makes this false.
+	// So does a destination other than a shader resource, a custom resource or an input assembler slot:
+	bool keeps_pending_binds() override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
 	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
 	// The slot a batch groups this operation by.
@@ -1536,19 +1552,15 @@ public:
 	wchar_t shader_type = L'\0';
 	unsigned first_slot = 0;
 	unsigned count = 0;
-	// Bind only: at least one operation is unless_null, so the batch reads
-	// the current bindings of its whole range first and only overwrites the
-	// slots whose operation actually assigned something. Everything else
-	// (unless_null slots with a null source, gaps between slots) is written
-	// back as it was:
-	bool prefetch_current_bindings = false;
 	std::vector<std::shared_ptr<ResourceCopyOperation>> operations;
 };
 
-// "<stage>-tN = ref ResourceFoo" lines: one XXSetShaderResources
+// "<stage>-tN = ref ResourceFoo" lines: one XXSetShaderResources,
+// made when the pending binds go out (an unless_null slot with a null source records nothing)
 class ShaderResourceBindBatch : public ShaderResourceBatch {
 public:
 	void run(CommandListState*) override;
+	bool keeps_pending_binds() override;
 };
 
 // "ResourceFoo = ref <stage>-tN" lines: one XXGetShaderResources
@@ -1587,6 +1599,8 @@ public:
 	void run(CommandListState*) override;
 	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view) override;
 	const ResourceCopyTarget& BatchTarget(BatchDirection direction) const override;
+	// Only when every branch does:
+	bool keeps_pending_binds() override;
 
 private:
 	// The branch whose condition holds, or NULL when no branch is taken:
@@ -1678,6 +1692,7 @@ public:
 	void run(CommandListState* state) override;
 
 	bool IsBatchable() const override { return false; }
+	bool keeps_pending_binds() override { return false; }
 };
 
 class SlotFilterOperation : public ResourceCopyOperation
@@ -1692,6 +1707,7 @@ public:
 	void run(CommandListState*) override;
 
 	bool IsBatchable() const override { return false; }
+	bool keeps_pending_binds() override { return false; }
 };
 
 class LayoutElementOperation : public CommandListCommand {
@@ -2049,6 +2065,7 @@ public:
 	{}
 
 	void run(CommandListState*) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 class VariableAssignment : public AssignmentCommand {
@@ -2060,6 +2077,7 @@ public:
 	{}
 
 	void run(CommandListState*) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 class PoolVariableOperation : public AssignmentCommand {
@@ -2099,6 +2117,7 @@ public:
 	void run(CommandListState*) override;
 	bool optimise(HackerDevice *device) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+	bool keeps_pending_binds() override { return true; }
 };
 
 class ElseIfCommand : public IfCommand {
@@ -2112,6 +2131,7 @@ class CommandPlaceholder : public CommandListCommand {
 public:
 	void run(CommandListState*) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+	bool keeps_pending_binds() override { return true; }
 };
 class ElsePlaceholder : public CommandPlaceholder {
 };

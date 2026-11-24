@@ -51,6 +51,7 @@
     <ClCompile Include="lock.cpp" />
     <ClCompile Include="Overlay.cpp" />
     <ClCompile Include="Override.cpp" />
+    <ClCompile Include="PendingBinds.cpp" />
     <ClCompile Include="profiling.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
@@ -87,6 +88,7 @@
     <ClInclude Include="Overlay.h" />
     <ClInclude Include="CommandList.h" />
     <ClInclude Include="Override.h" />
+    <ClInclude Include="PendingBinds.h" />
     <ClInclude Include="profiling.h" />
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="ShaderRegex.h" />
