@@ -189,6 +189,27 @@ static bool has_pending_binds(CommandListState *state)
 	return state && state->mHackerContext && !state->mHackerContext->mPendingBinds.Empty();
 }
 
+void FlushPendingBinds(HackerContext *context)
+{
+	if (context->mPendingBinds.Empty())
+		return;
+
+	context->mPendingBinds.Flush(context->GetPassThroughOrigContext1(), SetShaderResourcesBatch, SetConstantBuffersBatch, SetConstantBufferRegionsBatch);
+}
+
+PendingBindsHold::PendingBindsHold(HackerContext *context) :
+	context(context)
+{
+	context->mPendingBinds.Hold();
+}
+
+// Released before the flush, so that nothing the flush does can find it held.
+PendingBindsHold::~PendingBindsHold()
+{
+	context->mPendingBinds.Unhold();
+	FlushPendingBinds(context);
+}
+
 // Makes the shader resource and constant buffer binds this run has recorded but not yet sent.
 // Called before anything that reads or writes a t or cb slot of the real pipeline,
 // and drops the resolves like any other bind does:
@@ -198,7 +219,7 @@ static void flush_pending_binds(CommandListState *state)
 	if (!has_pending_binds(state))
 		return;
 
-	state->mHackerContext->mPendingBinds.Flush(state->mOrigContext1, SetShaderResourcesBatch, SetConstantBuffersBatch, SetConstantBufferRegionsBatch);
+	FlushPendingBinds(state->mHackerContext);
 	invalidate_resolved_resources(state);
 }
 
@@ -516,6 +537,8 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 	state.view = view;
 	state.post = post;
 
+	PendingBindsRun run(mHackerContext->mPendingBinds);
+
 	// Every resource this run reads is resolved once,
 	// however many conditions and properties ask for it, until something binds:
 	ResolvedResourceScope resolved(&state);
@@ -526,8 +549,9 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 	_RunCommandList(command_list, &state);
 
 	// An aborted list and the recursion limit leave binds pending as well:
-	// nothing outside a run may find one.
-	flush_pending_binds(&state);
+	// nothing outside a run may find one, other than a draw that holds them for its next run.
+	if (!mHackerContext->mPendingBinds.KeptAtRunEnd())
+		flush_pending_binds(&state);
 	CommandListFlushState(&state);
 }
 

@@ -2363,6 +2363,21 @@ private:
 	CommandList* failed_root = nullptr;
 };
 
+// Makes the binds recorded by command list runs that were not flushed at their end:
+void FlushPendingBinds(HackerContext *context);
+
+// Keeps the binds of the top level runs made while it lives pending, and makes them on the way out.
+class PendingBindsHold {
+public:
+	explicit PendingBindsHold(HackerContext *context);
+	~PendingBindsHold();
+	PendingBindsHold(const PendingBindsHold&) = delete;
+	PendingBindsHold& operator=(const PendingBindsHold&) = delete;
+
+private:
+	HackerContext *context;
+};
+
 void RunCommandList(HackerDevice *mHackerDevice,
 		HackerContext *mHackerContext,
 		CommandList *command_list, DrawCallInfo *call_info,

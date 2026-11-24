@@ -1035,6 +1035,9 @@ void HackerContext::BeforeDraw(DrawContext &data)
 	if (!G->mShaderOverrideMap.empty()) {
 		ShaderOverrideMap::iterator i;
 
+		// One flush for the binds of all the runs below, before the draw:
+		PendingBindsHold hold(this);
+
 		i = lookup_shaderoverride(mCurrentVertexShader);
 		if (i != G->mShaderOverrideMap.end()) {
 			data.post_commands[0] = &i->second.post_command_list;
