@@ -31,6 +31,7 @@ enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
 class ResourceFilterTarget;
 namespace SoundEngine { class Section; }
+struct ResolvedResource;
 
 struct InputLayoutElementOverride {
 	struct Match {
@@ -87,6 +88,13 @@ public:
 	ID3D11ShaderResourceView *cursor_mask_view;
 	ID3D11ShaderResourceView *cursor_color_view;
 	RECT window_rect;
+
+	// Resources resolved by a property read or a filter index comparison during a run,
+	// in storage ResolvedResourceScope owns for the length of that run.
+	// Emptied by anything that binds, which is what stops a resolve outliving what it read.
+	ResolvedResource *resolved_resources;
+	unsigned resolved_count;
+	unsigned resolved_capacity;
 
 	int recursion;
 	int extra_indent;
@@ -1112,6 +1120,100 @@ struct ResourceCopyInfo {
 	}
 };
 
+// D3D11 keeps a resource's description behind a GetDesc() of its own per dimension,
+// with no field in common between the four.
+// This is whichever one applies, in the shape the <target>->Property accessors ask about.
+struct ResourceDescInfo {
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	UINT width = 0;       // ByteWidth for a buffer
+	UINT height = 0;      // 1 for a 1D texture, 0 for a buffer
+	UINT array_size = 0;  // 1D and 2D textures only
+	UINT mip_levels = 0;  // Textures only
+	UINT stride = 0;      // StructureByteStride, buffers only
+	UINT bind_flags = 0;
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // Buffers have none
+
+	bool is_buffer() const { return dimension == D3D11_RESOURCE_DIMENSION_BUFFER; }
+	// A 3D texture has depth where the other two have an array size,
+	// so it is not one of these:
+	bool has_array() const
+	{
+		return dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D
+			|| dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+	}
+	bool is_texture() const
+	{
+		return has_array() || dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+	}
+};
+
+// What two property reads have to agree on to be reading the same resource.
+// Not the ResourceCopyTarget itself:
+// every operand of an expression holds its own copy of the target it reads,
+// so `ps-t0->Width` and `ps-t0->Height` arrive as two targets naming one slot.
+// Every field is a plain member of the target, so building a key resolves nothing and costs nothing.
+struct ResolvedResourceKey {
+	ResourceCopyTargetType type = ResourceCopyTargetType::INVALID;
+	wchar_t shader_type = L'\0';
+	unsigned slot = 0;
+	// A custom resource named directly, or indexed statically (PoolFoo[0]):
+	const CustomResource *custom_resource = nullptr;
+	// A bare pool, which answers for its template, and tells two of them apart:
+	const CustomResourcePool *pool = nullptr;
+
+	bool operator==(const ResolvedResourceKey &other) const
+	{
+		return type == other.type && shader_type == other.shader_type
+			&& slot == other.slot && custom_resource == other.custom_resource
+			&& pool == other.pool;
+	}
+};
+
+// A target resolved to what it holds, with the description read off it at most once however many properties ask,
+// and the texture filter index worked out at most once however many conditions compare it.
+// Owns the references it resolved.
+struct ResolvedResource {
+	ResolvedResourceKey key;
+	ResourceCopyInfo info;
+
+	// Only once info.resource is known to be there:
+	// a target with nothing bound resolves to no resource, and has no description to read:
+	const ResourceDescInfo &Description();
+
+	// What `o0 == 1234` compares:
+	// the filter_index of the highest priority [TextureOverride] matching this resource,
+	// which costs a handle info lookup, the global lock and a walk of its candidates to work out.
+	// Filled by the first condition that asks, read by the rest.
+	bool FilterIndex(float *filter_index) const;
+	void SetFilterIndex(float filter_index);
+
+	void Release();
+
+private:
+	ResourceDescInfo desc;
+	bool described = false;
+	float filter = 0.0f;
+	bool filtered = false;
+};
+
+// A resolve made for one read, which the read is finished with at the end of its scope:
+// released here unless it is one the run keeps.
+class ResolvedResourceRead {
+public:
+	ResolvedResourceRead(ResourceCopyTarget &target, CommandListState *state);
+	~ResolvedResourceRead();
+	ResolvedResourceRead(const ResolvedResourceRead &) = delete;
+	ResolvedResourceRead &operator=(const ResolvedResourceRead &) = delete;
+
+	ResolvedResource *operator->() { return resolved; }
+	ResolvedResource &operator*() { return *resolved; }
+
+private:
+	// Where a resolve goes when the run has no cache to keep it in:
+	ResolvedResource local;
+	ResolvedResource *resolved;
+};
+
 class ResourceCopyTarget : public SyntaxTarget
 {
 public:
@@ -1167,7 +1269,10 @@ public:
 	// The caller owns a reference on the resource returned and on info->view,
 	// and info->resource is left alone.
 	// dst is only used to substantiate a custom resource with the bind flags its destination needs.
-	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL);
+	// resolved_custom is the custom resource the caller has already resolved,
+	// so that a dynamic pool index (PoolFoo[$i]) is evaluated once, not twice.
+	ID3D11Resource *GetResource(CommandListState *state, ResourceCopyInfo *info, ResourceCopyTarget *dst=NULL,
+			CustomResource *resolved_custom=NULL);
 	void SetResource(CommandListState *state, const ResourceCopyInfo &binding);
 	void StoreInCustomResource(CommandListState *state, const ResourceCopyInfo &binding);
 
@@ -1175,6 +1280,10 @@ public:
 			CommandListState *state,
 			bool *resource_found,
 			TextureOverrideMatches *matches);
+	// The same matching, for a resource already resolved,
+	// which is how a filter index comparison gets at it without resolving again:
+	void MatchTextureOverrides(CommandListState *state, const ResourceCopyInfo &info, TextureOverrideMatches *matches);
+	float TextureFilterIndex(CommandListState *state);
 
 	float GetResourceId(CommandListState* state);
 	float GetPoolId();
@@ -1195,12 +1304,15 @@ public:
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
 private:
+	friend class ResolvedResourceRead;
+
 	// What every <target>->Property accessor shares.
 	// ResourceProperty() resolves the target, hands read() the resource, and releases what it resolved;
 	// PropertyCustomResource() is the metadata a custom resource answers from first;
 	// BufferRegionOffset() is where in a buffer slot the contents start.
 	template <typename ReadProperty>
 	float ResourceProperty(CommandListState *state, ReadProperty read);
+	ResolvedResource *ResolveForProperty(CommandListState *state, ResolvedResource *local);
 	bool PropertyCustomResource(CommandListState *state, CustomResource **custom_resource);
 	UINT BufferRegionOffset(CommandListState *state, const ResourceCopyInfo &info);
 
@@ -1923,6 +2035,21 @@ public:
 	float evaluate(CommandListState *state, HackerDevice *device=NULL) override;
 	bool static_evaluate(float *ret, HackerDevice *device=NULL, bool evaluate_variables=false) override;
 	bool optimise(HackerDevice *device, std::shared_ptr<CommandListEvaluatable> *replacement) override;
+};
+
+// Holds the resolves made during one command list run,
+// so that every property read and every texture filter comparison of one resource shares a single resolve of it.
+// Anything that binds clears them all: see SetResource().
+class ResolvedResourceScope {
+public:
+	explicit ResolvedResourceScope(CommandListState *state);
+	~ResolvedResourceScope();
+
+private:
+	// A run reads a handful of distinct things: vb0, vb2, so0, a couple of slots, a custom resource or two.
+	// Past that, a resolve happens as it did before rather than evicting anything.
+	ResolvedResource resolved[8];
+	CommandListState *owner;
 };
 
 class CommandListExpression {
