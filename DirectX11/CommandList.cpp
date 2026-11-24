@@ -174,6 +174,9 @@ struct InvalidateResolvedAround {
 };
 
 static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView *const *views);
+static void SetConstantBuffersBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11Buffer *const *buffers);
+static void SetConstantBufferRegionsBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count,
+		ID3D11Buffer *const *buffers, const UINT *cb_first, const UINT *cb_counts);
 
 // Some expressions are evaluated with no state at all.
 static bool has_pending_binds(CommandListState *state)
@@ -181,8 +184,8 @@ static bool has_pending_binds(CommandListState *state)
 	return state && state->mHackerContext && !state->mHackerContext->mPendingBinds.Empty();
 }
 
-// Makes the shader resource binds this run has recorded but not yet sent.
-// Called before anything that reads or writes a t slot of the real pipeline,
+// Makes the shader resource and constant buffer binds this run has recorded but not yet sent.
+// Called before anything that reads or writes a t or cb slot of the real pipeline,
 // and drops the resolves like any other bind does:
 // D3D11 unbinds the view of a resource that is also bound as an output.
 static void flush_pending_binds(CommandListState *state)
@@ -190,7 +193,7 @@ static void flush_pending_binds(CommandListState *state)
 	if (!has_pending_binds(state))
 		return;
 
-	state->mHackerContext->mPendingBinds.Flush(state->mOrigContext1, SetShaderResourcesBatch);
+	state->mHackerContext->mPendingBinds.Flush(state->mOrigContext1, SetShaderResourcesBatch, SetConstantBuffersBatch, SetConstantBufferRegionsBatch);
 	invalidate_resolved_resources(state);
 }
 
@@ -10956,6 +10959,7 @@ ID3D11Resource *ResourceCopyTarget::GetResource(CommandListState *state, Resourc
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
 	{
+		flush_pending_binds(state);
 		GetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf, &info->offset, &info->size);
 
 		// Derive data offset in bytes from FirstConstant, where each constant is 16 bytes long (4 * 32-bit components).
@@ -11216,6 +11220,9 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		if (!binding.size) {
 			if (binding.offset > 0)
 				LogOverlayW(LOG_DIRE, L"BUG: SetResource called with offset=%d but buf_size=0 for CONSTANT_BUFFER, falling back to plugging the entire buffer\n", binding.offset);
+			if (state->mHackerContext->mPendingBinds.RecordConstantBuffer(shader_type, slot, buf, false, 0, 0))
+				return;
+			flush_pending_binds(state);
 			SetConstantBuffersBatch(mOrigContext1, shader_type, slot, 1, &buf);
 			return;
 		}
@@ -11227,6 +11234,9 @@ void ResourceCopyTarget::SetResource(CommandListState *state, const ResourceCopy
 		// NumConstants define length of CB region in constants that is currently visible to shaders (bound via VSSetConstantBuffers1).
 		cb_count = binding.size / 16;
 
+		if (state->mHackerContext->mPendingBinds.RecordConstantBuffer(shader_type, slot, buf, true, cb_first, cb_count))
+			return;
+		flush_pending_binds(state);
 		SetConstantBufferRegionsBatch(mOrigContext1, shader_type, slot, 1, &buf, &cb_first, &cb_count);
 		return;
 
@@ -11683,11 +11693,12 @@ ResolvedResourceScope::~ResolvedResourceScope()
 }
 
 // Whether resolving the target, or reading a property off it, can flush the pending binds:
-// a t slot is read from the pipeline, and an argument such as the offset of HashRegion is an expression that may read one.
+// a t or cb slot is read from the pipeline, and an argument such as the offset of HashRegion is an expression that may read one.
 static bool resolve_may_flush(const ResourceCopyTarget &target)
 {
 	switch (target.type) {
 		case ResourceCopyTargetType::SHADER_RESOURCE:
+		case ResourceCopyTargetType::CONSTANT_BUFFER:
 		case ResourceCopyTargetType::THIS_RESOURCE:
 			return true;
 	}
@@ -13850,6 +13861,7 @@ bool ResourceCopyOperation::keeps_pending_binds()
 
 	switch (dst.type) {
 		case ResourceCopyTargetType::SHADER_RESOURCE:
+		case ResourceCopyTargetType::CONSTANT_BUFFER:
 		case ResourceCopyTargetType::CUSTOM_RESOURCE:
 		case ResourceCopyTargetType::VERTEX_BUFFER:
 		case ResourceCopyTargetType::INDEX_BUFFER:
@@ -14473,6 +14485,7 @@ static void GetSlotRange(CommandListState *state, ResourceCopyTarget &target, un
 		GetUnorderedAccessViewsBatch(context, target.shader_type, first, count, (ID3D11UnorderedAccessView**)bindings.views);
 		break;
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
+		flush_pending_binds(state);
 		GetConstantBuffersBatch(context, target.shader_type, first, count, bindings.buffers, bindings.cb_offsets, bindings.cb_sizes);
 		// Same unit conversion as GetResource(): constants -> bytes
 		for (unsigned i = 0; i < count; i++) {

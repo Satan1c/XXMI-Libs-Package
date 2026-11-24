@@ -1518,7 +1518,7 @@ public:
 
 	void run(CommandListState*) override;
 	// Any option that affects pipeline state makes this false.
-	// So does a destination other than a shader resource, a custom resource or an input assembler slot:
+	// So does a destination other than a shader resource, a constant buffer, a custom resource or an input assembler slot:
 	bool keeps_pending_binds() override;
 	// Used by ShaderResourceFetchBatch, which fetched the source itself:
 	virtual void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
