@@ -72,7 +72,9 @@ static bool can_share_call(ID3D11Buffer *buffer, bool region, UINT first, UINT c
 }
 
 PendingBinds::PendingBinds() :
-	pending(false)
+	pending(false),
+	held(0),
+	run_depth(0)
 {
 	for (Stage &stage : stages) {
 		for (uint64_t &word : stage.dirty)

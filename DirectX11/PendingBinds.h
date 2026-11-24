@@ -38,6 +38,16 @@ public:
 
 	bool Empty() const { return !pending; }
 
+	// While held, the end of a top level run leaves the binds pending for the runs that follow:
+	void Hold() { held++; }
+	void Unhold() { held--; }
+	void EnterRun() { run_depth++; }
+	void LeaveRun() { run_depth--; }
+
+	// Only the outermost run may leave them pending:
+	// a nested one is started by a command that goes on to read the real slots.
+	bool KeptAtRunEnd() const { return held && run_depth == 1; }
+
 	// Returns whether anything was bound:
 	bool Flush(ID3D11DeviceContext1 *context, Setter setter, ConstantBufferSetter cb_setter, ConstantBufferRegionSetter cb_region_setter);
 
@@ -65,6 +75,8 @@ private:
 
 	Stage stages[STAGE_COUNT];
 	bool pending;
+	unsigned held;
+	unsigned run_depth;
 
 	bool FlushStage(Stage &stage, wchar_t shader_type, ID3D11DeviceContext1 *context, Setter setter);
 	bool FlushConstantBuffers(Stage &stage, wchar_t shader_type, ID3D11DeviceContext1 *context,
@@ -73,4 +85,16 @@ private:
 	static void BindConstantBufferRun(const Stage &stage, wchar_t shader_type, ID3D11DeviceContext1 *context, unsigned first, unsigned end,
 			ConstantBufferSetter cb_setter, ConstantBufferRegionSetter cb_region_setter);
 	static void ReleaseStage(Stage &stage);
+};
+
+// Counts a command list run on the context, so that a nested one can be told from the outermost.
+class PendingBindsRun {
+public:
+	explicit PendingBindsRun(PendingBinds &binds) : binds(binds) { binds.EnterRun(); }
+	~PendingBindsRun() { binds.LeaveRun(); }
+	PendingBindsRun(const PendingBindsRun&) = delete;
+	PendingBindsRun& operator=(const PendingBindsRun&) = delete;
+
+private:
+	PendingBinds &binds;
 };
