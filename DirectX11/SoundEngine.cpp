@@ -267,9 +267,16 @@ namespace SoundEngine {
 		return detail;
 	}
 
-	// The sound at this path, loaded on the first ask and cached.
-	// NULL with a logged reason if it will not load,
-	// so that a missing file is a silent sound rather than a dead mod.
+	static std::wstring sound_extension(const std::wstring &path)
+	{
+		const auto dot = path.find_last_of(L'.');
+		const auto separator = path.find_last_of(L"\\/");
+		if (dot == std::wstring::npos || (separator != std::wstring::npos && dot < separator))
+			return {};
+
+		return path.substr(dot);
+	}
+
 	static Sound *load_locked(const std::wstring &path)
 	{
 		LARGE_INTEGER before;
@@ -285,26 +292,25 @@ namespace SoundEngine {
 
 		QueryPerformanceCounter(&before);
 
-		const auto dot = key.find_last_of(L'.');
-	const auto separator = key.find_last_of(L"\\/");
-	const std::wstring extension = dot != std::wstring::npos &&
-			(separator == std::wstring::npos || dot > separator) ? key.substr(dot) : L"";
-	const bool compressed = is_compressed_sound(extension);
+		const std::wstring extension = sound_extension(key);
+		const bool compressed = is_compressed_sound(extension);
 
-	std::unique_ptr<DirectX::SoundEffect> effect;
-	try {
-		if (compressed)
-			effect = load_compressed_sound(audio, path, extension);
-		else
-			effect = std::make_unique<DirectX::SoundEffect>(audio, path.c_str());
-	} catch (const std::exception &e) {
-		if (compressed)
-			LogOverlayW(LOG_NOTICE, L"Sound: cannot load %ls: %hs\n", path.c_str(), e.what());
-		else
-			LogOverlayW(LOG_NOTICE, L"Sound: cannot load %ls: %ls\n", path.c_str(), wav_problem(path).c_str());
+		std::unique_ptr<DirectX::SoundEffect> effect;
+		try {
+			if (compressed)
+				effect = load_compressed_sound(audio, path, extension);
+			else
+				effect = std::make_unique<DirectX::SoundEffect>(audio, path.c_str());
+		} catch (const std::exception &e) {
+			if (compressed)
+				LogOverlayW(LOG_NOTICE, L"Sound: cannot load %ls: %hs\n",
+						path.c_str(), e.what());
+			else
+				LogOverlayW(LOG_NOTICE, L"Sound: cannot load %ls: %ls\n",
+						path.c_str(), wav_problem(path).c_str());
 			LogInfo("Sound: %s\n", e.what());
-			// Remembered as unloadable:
-			// a per draw call sound must not open a missing file every frame.
+
+			// Cache failures so per-draw commands never retry them.
 			sounds.emplace(key, nullptr);
 			return NULL;
 		}
