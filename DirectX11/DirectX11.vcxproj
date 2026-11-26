@@ -56,6 +56,8 @@
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
     <ClCompile Include="SoundEngine.cpp" />
+    <ClCompile Include="SoundFile.cpp" />
+    <ClCompile Include="..\ThirdPartyLibs\dr_libs\dr_mp3.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />
@@ -94,6 +96,8 @@
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="ShaderRegex.h" />
     <ClInclude Include="SoundEngine.h" />
+    <ClInclude Include="SoundFile.h" />
+    <ClInclude Include="..\ThirdPartyLibs\dr_libs\dr_mp3.h" />
     <ClInclude Include="..\vkeys.h" />
   </ItemGroup>
   <ItemGroup>

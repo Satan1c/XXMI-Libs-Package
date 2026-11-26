@@ -33,7 +33,7 @@ namespace SoundEngine {
 	// Volume is a multiplier, and this is as loud as XAudio2 will take:
 	const float max_volume = XAUDIO2_MAX_VOLUME_LEVEL;
 
-	// A decoded wav, held once per path however many ini sections name it.
+	// A sound buffer, held once per path however many ini sections name it.
 	class Sound {
 	public:
 		explicit Sound(std::unique_ptr<DirectX::SoundEffect> effect) : effect(std::move(effect)) {}

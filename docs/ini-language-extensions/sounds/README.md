@@ -17,17 +17,19 @@ overlap = true
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `filename` | — | The `.wav` to play. Resolved beside the DLL, or inside the namespace of the INI that declared it, exactly as `[Resource*]` filenames are. |
+| `filename` | — | The audio file to play. Resolved beside the DLL, or inside the namespace of the INI that declared it, exactly as `[Resource*]` filenames are. |
 | `volume` | `1.0` | A multiplier on the file's own level. |
 | `speed` | `1.0` | A multiplier on the file's own rate, from `0.5` to `2.0`. |
 | `loop` | `false` | Whether playback repeats until stopped. |
 | `overlap` | `false` | Whether each play starts a voice of its own. See [Overlap](#overlap). |
 
-The file must be a real `.wav` holding PCM, IEEE float or MS ADPCM data, and the whole of it is read into RAM. An MP3 or Ogg renamed to `.wav` is the usual mistake and is rejected with a reason on the overlay; convert it first:
+Supported files are WAV (PCM, IEEE float or MS ADPCM) and MP3. AAC, M4A and
+WMA also work when Windows Media Foundation can decode the file. On Windows N
+editions, these formats require the Media Feature Pack.
 
-```
-ffmpeg -i music.mp3 -c:a pcm_s16le music.wav
-```
+MP3 and Media Foundation formats are decoded to PCM in memory. The engine
+preloads the complete clip, so compressed files save disk space and download
+size while consuming decoded audio memory.
 
 The audio device is opened and the files are read while the INI is read, so neither happens inside a frame. A declaration that cannot be satisfied — no audio device, a missing file — is a warning and a silent sound, never a dead mod.
 
@@ -88,6 +90,6 @@ if SoundMap->Playing && SoundMap->Position > SoundMap->Length - 2000
 endif
 ```
 
-`Position` only answers for a sound that owns its voice, since an overlapping one may have several plays sounding at different points; it reports `0`. `Playing` answers for both, but for an overlapping sound it counts every play of that **file**, so two sections naming one `.wav` answer for each other.
+`Position` only answers for a sound that owns its voice, since an overlapping one may have several plays sounding at different points; it reports `0`. `Playing` answers for both, but for an overlapping sound it counts every play of that **file**, so two sections naming one audio file answer for each other.
 
 The position is in the sound's own time, so `speed` does not change what `Position` and `Length` mean.
